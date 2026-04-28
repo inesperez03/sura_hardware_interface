@@ -4,6 +4,7 @@
 #include "bindings.h"
 #endif
 
+#include <cstdlib>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -18,6 +19,7 @@ namespace
 {
 
 const rclcpp::Logger kLogger = rclcpp::get_logger("sura_hardware_interface");
+constexpr const char * kThrusterLpfAlphaEnv = "BLUEBOAT_THRUSTER_LPF_ALPHA";
 
 #ifdef TARGET_RASPBERRY
 static uint16_t pulse_us_to_counts(double pulse_us, double freq_hz)
@@ -60,7 +62,22 @@ bool parse_bool_parameter(const std::string & value)
   throw std::invalid_argument("Invalid boolean value: " + value);
 }
 
+double parse_double_parameter(const std::string & value)
+{
+  std::size_t processed = 0;
+  const double parsed = std::stod(value, &processed);
+  if (processed != value.size()) {
+    throw std::invalid_argument("Trailing characters in double value: " + value);
+  }
+  return parsed;
+}
+
 }  // namespace
+
+void ThrustersSystem::reset_thruster_filter()
+{
+  filtered_force_commands_.assign(info_.joints.size(), 0.0);
+}
 
 void ThrustersSystem::publish_zero_command()
 {
@@ -141,6 +158,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_init(
     info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
   last_outputs_.assign(
     info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
+  reset_thruster_filter();
   inverted_flags_.assign(info_.joints.size(), false);
 
   for (std::size_t index = 0; index < info_.joints.size(); ++index) {
@@ -180,6 +198,26 @@ hardware_interface::CallbackReturn ThrustersSystem::on_init(
       RCLCPP_ERROR(kLogger, "Failed to parse pwm_channels: %s", e.what());
       return hardware_interface::CallbackReturn::ERROR;
     }
+  }
+
+  thruster_lpf_alpha_ = 1.0;
+  if (const char * alpha_env = std::getenv(kThrusterLpfAlphaEnv); alpha_env != nullptr) {
+    try {
+      thruster_lpf_alpha_ = std::clamp(parse_double_parameter(alpha_env), 0.0, 1.0);
+    } catch (const std::exception & e) {
+      RCLCPP_WARN(
+        kLogger,
+        "Invalid %s value '%s': %s. Falling back to alpha=1.0",
+        kThrusterLpfAlphaEnv,
+        alpha_env,
+        e.what());
+      thruster_lpf_alpha_ = 1.0;
+    }
+  } else {
+    RCLCPP_INFO(
+      kLogger,
+      "%s not set. Thruster LPF disabled (alpha=1.0)",
+      kThrusterLpfAlphaEnv);
   }
 
   if (environment_ == "real" && !pwm_channel_indices_.empty() &&
@@ -286,6 +324,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_configure(
   RCLCPP_INFO(kLogger, "Environment: %s", environment_.c_str());
   RCLCPP_INFO(kLogger, "Thruster joints: %zu", info_.joints.size());
   RCLCPP_INFO(kLogger, "Loaded CSV samples: %zu", mapper_.size());
+  RCLCPP_INFO(kLogger, "Thruster LPF alpha: %.3f", thruster_lpf_alpha_);
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -297,6 +336,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_cleanup(
 
   std::fill(force_commands_.begin(), force_commands_.end(), 0.0);
   std::fill(force_states_.begin(), force_states_.end(), 0.0);
+  reset_thruster_filter();
 
   publish_zero_command();
 
@@ -338,6 +378,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_shutdown(
 
   std::fill(force_commands_.begin(), force_commands_.end(), 0.0);
   std::fill(force_states_.begin(), force_states_.end(), 0.0);
+  reset_thruster_filter();
 
   publish_zero_command();
 
@@ -370,6 +411,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_activate(
 
   std::fill(force_commands_.begin(), force_commands_.end(), 0.0);
   std::fill(force_states_.begin(), force_states_.end(), 0.0);
+  reset_thruster_filter();
   std::fill(
     last_force_commands_.begin(),
     last_force_commands_.end(),
@@ -392,6 +434,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_deactivate(
 
   std::fill(force_commands_.begin(), force_commands_.end(), 0.0);
   std::fill(force_states_.begin(), force_states_.end(), 0.0);
+  reset_thruster_filter();
 
   publish_zero_command();
 
@@ -419,6 +462,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_error(
 
   std::fill(force_commands_.begin(), force_commands_.end(), 0.0);
   std::fill(force_states_.begin(), force_states_.end(), 0.0);
+  reset_thruster_filter();
 
   publish_zero_command();
 
@@ -476,7 +520,7 @@ hardware_interface::return_type ThrustersSystem::read(
   const rclcpp::Time & /*time*/,
   const rclcpp::Duration & /*period*/)
 {
-  force_states_ = force_commands_;
+  force_states_ = filtered_force_commands_;
   return hardware_interface::return_type::OK;
 }
 
@@ -491,20 +535,27 @@ hardware_interface::return_type ThrustersSystem::write(
   }
 
   std::vector<double> stonefish_outputs(info_.joints.size(), 0.0);
+  if (filtered_force_commands_.size() != info_.joints.size()) {
+    reset_thruster_filter();
+  }
 
 #ifdef TARGET_RASPBERRY
   std::vector<uint16_t> pwm_counts(info_.joints.size(), 0U);
 #endif
 
   for (std::size_t index = 0; index < info_.joints.size(); ++index) {
-    stonefish_outputs[index] = mapper_.forceToStonefish(force_commands_[index]);
+    const double raw_force = force_commands_[index];
+    const double filtered_force =
+      filtered_force_commands_[index] +
+      thruster_lpf_alpha_ * (raw_force - filtered_force_commands_[index]);
+    filtered_force_commands_[index] = filtered_force;
+    stonefish_outputs[index] = mapper_.forceToStonefish(filtered_force);
 
 #ifdef TARGET_RASPBERRY
-    double commanded_force = force_commands_[index];
-    double applied_force = commanded_force;
+    double applied_force = filtered_force;
 
     if (environment_ == "real" && inverted_flags_[index]) {
-      applied_force = commanded_force;
+      applied_force = filtered_force;
     }
 
     double pulse_us = mapper_.forceToPwm(applied_force);
@@ -516,6 +567,8 @@ hardware_interface::return_type ThrustersSystem::write(
     pwm_counts[index] = pulse_us_to_counts(pulse_us, pwm_frequency_hz_);
 #endif
   }
+
+  force_states_ = filtered_force_commands_;
 
   if (environment_ == "real") {
 #ifndef TARGET_RASPBERRY
@@ -547,7 +600,7 @@ hardware_interface::return_type ThrustersSystem::write(
     for (std::size_t index = 0; index < info_.joints.size(); ++index) {
       if (
         std::isnan(last_force_commands_[index]) ||
-        std::fabs(force_commands_[index] - last_force_commands_[index]) > 1e-6 ||
+        std::fabs(filtered_force_commands_[index] - last_force_commands_[index]) > 1e-6 ||
         std::fabs(static_cast<double>(pwm_counts[index]) - last_outputs_[index]) > 1e-6)
       {
         changed = true;
@@ -556,7 +609,7 @@ hardware_interface::return_type ThrustersSystem::write(
     }
 
     if (changed) {
-      last_force_commands_ = force_commands_;
+      last_force_commands_ = filtered_force_commands_;
       for (std::size_t index = 0; index < info_.joints.size(); ++index) {
         last_outputs_[index] = static_cast<double>(pwm_counts[index]);
       }
@@ -576,7 +629,7 @@ hardware_interface::return_type ThrustersSystem::write(
     for (std::size_t index = 0; index < info_.joints.size(); ++index) {
       if (
         std::isnan(last_force_commands_[index]) ||
-        std::fabs(force_commands_[index] - last_force_commands_[index]) > 1e-6 ||
+        std::fabs(filtered_force_commands_[index] - last_force_commands_[index]) > 1e-6 ||
         std::fabs(stonefish_outputs[index] - last_outputs_[index]) > 1e-6)
       {
         changed = true;
@@ -585,7 +638,7 @@ hardware_interface::return_type ThrustersSystem::write(
     }
 
     if (changed) {
-      last_force_commands_ = force_commands_;
+      last_force_commands_ = filtered_force_commands_;
       last_outputs_ = stonefish_outputs;
     }
   } else {

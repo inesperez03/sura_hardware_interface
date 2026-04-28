@@ -56,6 +56,7 @@ public:
 
 private:
   void publish_zero_command();
+  void reset_thruster_filter();
 
   std::string environment_;
   std::string lookup_csv_path_;
@@ -67,6 +68,8 @@ private:
   std::vector<double> force_states_;
   std::vector<double> last_force_commands_;
   std::vector<double> last_outputs_;
+  std::vector<double> filtered_force_commands_;
+  double thruster_lpf_alpha_{1.0};
 
   // Per-joint flag: if true, mirror PWM around 1500 us in real hardware mode.
   std::vector<bool> inverted_flags_;
