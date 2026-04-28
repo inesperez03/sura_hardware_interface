@@ -73,12 +73,13 @@ bool ImuInterface::read(
   orientation_w = 1.0;
 
 #ifdef TARGET_RASPBERRY
-  angular_velocity_x = static_cast<double>(gyro.x);
-  angular_velocity_y = static_cast<double>(gyro.y);
+// Navigator IMU frame is SWD to converto to NED frame invert the X and Y axis
+  angular_velocity_x = static_cast<double>(-gyro.x);
+  angular_velocity_y = static_cast<double>(-gyro.y);
   angular_velocity_z = static_cast<double>(gyro.z);
 
-  linear_acceleration_x = static_cast<double>(accel.x);
-  linear_acceleration_y = static_cast<double>(accel.y);
+  linear_acceleration_x = static_cast<double>(-accel.x);
+  linear_acceleration_y = static_cast<double>(-accel.y);
   linear_acceleration_z = static_cast<double>(accel.z);
 #else
   angular_velocity_x = 0.0;

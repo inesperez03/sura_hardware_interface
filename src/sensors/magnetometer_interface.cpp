@@ -14,8 +14,9 @@ bool MagnetometerInterface::read(
 {
 #ifdef TARGET_RASPBERRY
   const AxisData mag = read_mag();
-  magnetic_field_x = static_cast<double>(mag.x);
-  magnetic_field_y = static_cast<double>(mag.y);
+  // ROTATION_YAW_270: x' = y, y' = -x, z' = z
+  magnetic_field_x = static_cast<double>(mag.y);
+  magnetic_field_y = -static_cast<double>(mag.x);
   magnetic_field_z = static_cast<double>(mag.z);
 #else
   magnetic_field_x = 0.0;

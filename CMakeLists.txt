@@ -51,6 +51,7 @@ add_library(${PROJECT_NAME} SHARED
   src/sensors/sensors_system.cpp
   src/sensors/imu_interface.cpp
   src/sensors/magnetometer_interface.cpp
+  src/sensors/pressure_interface.cpp
 )
 
 if(TARGET_RASPBERRY)

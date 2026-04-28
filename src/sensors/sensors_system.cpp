@@ -38,6 +38,7 @@ hardware_interface::CallbackReturn SensorsSystem::on_init(
 
   has_imu_ = has_sensor(imu_sensor_name_);
   has_magnetometer_ = has_sensor(magnetometer_sensor_name_);
+  has_pressure_ = has_sensor(pressure_sensor_name_);
 
   if (!has_imu_) {
     RCLCPP_ERROR(
@@ -55,11 +56,20 @@ hardware_interface::CallbackReturn SensorsSystem::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  if (!has_pressure_) {
+    RCLCPP_ERROR(
+      kLogger,
+      "Sensor '%s' not found in ros2_control description",
+      pressure_sensor_name_.c_str());
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
   RCLCPP_INFO(
     kLogger,
-    "SensorsSystem initialized. IMU sensor '%s' and magnetometer sensor '%s' detected.",
+    "SensorsSystem initialized. IMU='%s', Magnetometer='%s', Pressure='%s' detected.",
     imu_sensor_name_.c_str(),
-    magnetometer_sensor_name_.c_str());
+    magnetometer_sensor_name_.c_str(),
+    pressure_sensor_name_.c_str());
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -78,6 +88,13 @@ hardware_interface::CallbackReturn SensorsSystem::on_configure(
     RCLCPP_ERROR(
       kLogger,
       "Cannot configure SensorsSystem because no magnetometer sensor was detected");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  if (!has_pressure_) {
+    RCLCPP_ERROR(
+      kLogger,
+      "Cannot configure SensorsSystem because no pressure sensor was detected");
     return hardware_interface::CallbackReturn::ERROR;
   }
 
@@ -134,7 +151,10 @@ hardware_interface::CallbackReturn SensorsSystem::on_deactivate(
 std::vector<hardware_interface::StateInterface> SensorsSystem::export_state_interfaces()
 {
   std::vector<hardware_interface::StateInterface> interfaces;
-  interfaces.reserve((has_imu_ ? 10U : 0U) + (has_magnetometer_ ? 3U : 0U));
+  interfaces.reserve(
+    (has_imu_ ? 10U : 0U) +
+    (has_magnetometer_ ? 3U : 0U) +
+    (has_pressure_ ? 1U : 0U));
 
   if (has_imu_) {
     interfaces.emplace_back(imu_sensor_name_, "orientation.x", &orientation_x_);
@@ -158,6 +178,11 @@ std::vector<hardware_interface::StateInterface> SensorsSystem::export_state_inte
       magnetometer_sensor_name_, "magnetic_field.y", &magnetic_field_y_);
     interfaces.emplace_back(
       magnetometer_sensor_name_, "magnetic_field.z", &magnetic_field_z_);
+  }
+
+  if (has_pressure_) {
+    interfaces.emplace_back(
+      pressure_sensor_name_, "fluid_pressure", &fluid_pressure_);
   }
 
   return interfaces;
@@ -251,6 +276,15 @@ hardware_interface::return_type SensorsSystem::read(
     }
   }
 
+  if (has_pressure_) {
+    const bool pressure_ok = pressure_.read(fluid_pressure_);
+
+    if (!pressure_ok) {
+      RCLCPP_ERROR(kLogger, "Failed to read pressure data");
+      return hardware_interface::return_type::ERROR;
+    }
+  }
+
   return hardware_interface::return_type::OK;
 }
 
@@ -279,6 +313,8 @@ void SensorsSystem::reset_sensor_state()
   magnetic_field_x_ = 0.0;
   magnetic_field_y_ = 0.0;
   magnetic_field_z_ = 0.0;
+
+  fluid_pressure_ = 0.0;
 }
 
 }  // namespace sura_hardware_interface

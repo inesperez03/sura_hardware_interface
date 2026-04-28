@@ -11,6 +11,7 @@
 
 #include "sura_hardware_interface/sensors/imu_interface.hpp"
 #include "sura_hardware_interface/sensors/magnetometer_interface.hpp"
+#include "sura_hardware_interface/sensors/pressure_interface.hpp"
 
 namespace sura_hardware_interface
 {
@@ -59,13 +60,16 @@ private:
 
   ImuInterface imu_;
   MagnetometerInterface magnetometer_;
+  PressureInterface pressure_;
 
   bool has_imu_{false};
   bool has_magnetometer_{false};
+  bool has_pressure_{false};
   bool is_active_{false};
 
   std::string imu_sensor_name_{"imu_sensor"};
   std::string magnetometer_sensor_name_{"magnetometer_sensor"};
+  std::string pressure_sensor_name_{"pressure_sensor"};
 
   double orientation_x_{0.0};
   double orientation_y_{0.0};
@@ -83,6 +87,8 @@ private:
   double magnetic_field_x_{0.0};
   double magnetic_field_y_{0.0};
   double magnetic_field_z_{0.0};
+
+  double fluid_pressure_{0.0};
 };
 
 }  // namespace sura_hardware_interface
