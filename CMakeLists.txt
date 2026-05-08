@@ -12,27 +12,45 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(stonefish_ros2 REQUIRED)
+
+# Detect architecture
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" SURA_SYSTEM_PROCESSOR)
+
+set(TARGET_RASPBERRY FALSE)
+
+if(SURA_SYSTEM_PROCESSOR MATCHES "aarch64|armv7l|armv7|arm")
+  set(TARGET_RASPBERRY TRUE)
+endif()
+
+# Stonefish is only needed for desktop/simulation builds.
+option(SURA_ENABLE_STONEFISH "Build Stonefish simulation support" ON)
+
+if(TARGET_RASPBERRY)
+  message(STATUS "Raspberry/ARM detected: disabling stonefish_ros2 dependency")
+  set(SURA_ENABLE_STONEFISH OFF CACHE BOOL "Build Stonefish simulation support" FORCE)
+endif()
+
+if(SURA_ENABLE_STONEFISH)
+  find_package(stonefish_ros2 REQUIRED)
+  add_compile_definitions(SURA_HAS_STONEFISH=1)
+else()
+  add_compile_definitions(SURA_HAS_STONEFISH=0)
+endif()
 
 include(ExternalProject)
 
 set(ZIP_URL "https://github.com/bluerobotics/navigator-lib/releases/latest/download/cpp.zip")
 set(NAVIGATOR_DIR "${CMAKE_BINARY_DIR}/navigator_zip_contents")
 
-# Detect architecture
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "armv7")
-  set(NAVIGATOR_ARCH "armv7-unknown-linux-gnueabihf")
-  set(TARGET_RASPBERRY TRUE)
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-  set(NAVIGATOR_ARCH "aarch64-unknown-linux-gnu")
-  set(TARGET_RASPBERRY TRUE)
-else()
-  message(WARNING "Building sura_hardware_interface in desktop mode on unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
-  set(TARGET_RASPBERRY FALSE)
-endif()
-
-# Only download and link navigator-lib on Raspberry-compatible targets
 if(TARGET_RASPBERRY)
+  if(SURA_SYSTEM_PROCESSOR MATCHES "armv7")
+    set(NAVIGATOR_ARCH "armv7-unknown-linux-gnueabihf")
+  elseif(SURA_SYSTEM_PROCESSOR MATCHES "aarch64")
+    set(NAVIGATOR_ARCH "aarch64-unknown-linux-gnu")
+  else()
+    message(FATAL_ERROR "Unsupported Raspberry/ARM architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+  endif()
+
   ExternalProject_Add(
     navigator_lib
     URL ${ZIP_URL}
@@ -45,6 +63,8 @@ if(TARGET_RASPBERRY)
   )
 
   set(NAVIGATOR_LIB "${NAVIGATOR_DIR}/${NAVIGATOR_ARCH}/libbluerobotics_navigator.so")
+else()
+  message(WARNING "Building sura_hardware_interface in desktop mode on architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
 add_library(${PROJECT_NAME} SHARED
@@ -58,15 +78,13 @@ add_library(${PROJECT_NAME} SHARED
   src/sensors/dvl75_interface.cpp
 )
 
-if(TARGET_RASPBERRY)
-  add_dependencies(${PROJECT_NAME} navigator_lib)
-endif()
-
 target_include_directories(${PROJECT_NAME} PRIVATE
   include
 )
 
 if(TARGET_RASPBERRY)
+  add_dependencies(${PROJECT_NAME} navigator_lib)
+
   target_include_directories(${PROJECT_NAME} PRIVATE
     ${NAVIGATOR_DIR}
   )
@@ -87,8 +105,13 @@ ament_target_dependencies(${PROJECT_NAME}
   rclcpp_lifecycle
   sensor_msgs
   std_msgs
-  stonefish_ros2
 )
+
+if(SURA_ENABLE_STONEFISH)
+  ament_target_dependencies(${PROJECT_NAME}
+    stonefish_ros2
+  )
+endif()
 
 pluginlib_export_plugin_description_file(
   hardware_interface
@@ -127,7 +150,12 @@ ament_export_dependencies(
   pluginlib
   rclcpp
   rclcpp_lifecycle
+  sensor_msgs
   std_msgs
 )
+
+if(SURA_ENABLE_STONEFISH)
+  ament_export_dependencies(stonefish_ros2)
+endif()
 
 ament_package()
