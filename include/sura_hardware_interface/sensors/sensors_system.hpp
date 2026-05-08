@@ -16,7 +16,9 @@
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <sensor_msgs/msg/nav_sat_status.hpp>
 #include <sensor_msgs/msg/range.hpp>
+#ifndef TARGET_RASPBERRY
 #include <stonefish_ros2/msg/dvl.hpp>
+#endif
 
 #include "sura_hardware_interface/sensors/imu_interface.hpp"
 #include "sura_hardware_interface/sensors/magnetometer_interface.hpp"
@@ -74,7 +76,9 @@ private:
   void sim_imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg);
   void sim_magnetometer_callback(const sensor_msgs::msg::MagneticField::SharedPtr msg);
   void sim_pressure_callback(const sensor_msgs::msg::FluidPressure::SharedPtr msg);
+#ifndef TARGET_RASPBERRY
   void sim_dvl_callback(const stonefish_ros2::msg::DVL::SharedPtr msg);
+#endif
   void sim_dvl_altitude_callback(const sensor_msgs::msg::Range::SharedPtr msg);
   void sim_gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg);
 
@@ -108,7 +112,9 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sim_imu_sub_;
   rclcpp::Subscription<sensor_msgs::msg::MagneticField>::SharedPtr sim_magnetometer_sub_;
   rclcpp::Subscription<sensor_msgs::msg::FluidPressure>::SharedPtr sim_pressure_sub_;
+#ifndef TARGET_RASPBERRY
   rclcpp::Subscription<stonefish_ros2::msg::DVL>::SharedPtr sim_dvl_sub_;
+#endif
   rclcpp::Subscription<sensor_msgs::msg::Range>::SharedPtr sim_dvl_altitude_sub_;
   rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr sim_gps_sub_;
 

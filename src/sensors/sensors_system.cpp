@@ -530,11 +530,13 @@ void SensorsSystem::configure_sim_subscribers()
       sim_pressure_callback(msg);
     });
 
+#ifndef TARGET_RASPBERRY
   sim_dvl_sub_ = sim_node_->create_subscription<stonefish_ros2::msg::DVL>(
     sim_dvl_topic_, rclcpp::SensorDataQoS(),
     [this](const stonefish_ros2::msg::DVL::SharedPtr msg) {
       sim_dvl_callback(msg);
     });
+#endif
 
   sim_dvl_altitude_sub_ = sim_node_->create_subscription<sensor_msgs::msg::Range>(
     sim_dvl_altitude_topic_, rclcpp::SensorDataQoS(),
@@ -564,7 +566,9 @@ void SensorsSystem::reset_sim_subscribers()
   sim_imu_sub_.reset();
   sim_magnetometer_sub_.reset();
   sim_pressure_sub_.reset();
+#ifndef TARGET_RASPBERRY
   sim_dvl_sub_.reset();
+#endif
   sim_dvl_altitude_sub_.reset();
   sim_gps_sub_.reset();
   sim_node_.reset();
@@ -600,6 +604,7 @@ void SensorsSystem::sim_pressure_callback(
   fluid_pressure_ = msg->fluid_pressure;
 }
 
+#ifndef TARGET_RASPBERRY
 void SensorsSystem::sim_dvl_callback(const stonefish_ros2::msg::DVL::SharedPtr msg)
 {
   dvl_linear_velocity_x_ = msg->velocity.x;
@@ -617,6 +622,7 @@ void SensorsSystem::sim_dvl_callback(const stonefish_ros2::msg::DVL::SharedPtr m
     dvl_confidence_ = 0.0;
   }
 }
+#endif
 
 void SensorsSystem::sim_dvl_altitude_callback(
   const sensor_msgs::msg::Range::SharedPtr msg)

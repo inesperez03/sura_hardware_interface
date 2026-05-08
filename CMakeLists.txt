@@ -12,7 +12,6 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(stonefish_ros2 REQUIRED)
 
 include(ExternalProject)
 
@@ -29,6 +28,10 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
 else()
   message(WARNING "Building sura_hardware_interface in desktop mode on unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
   set(TARGET_RASPBERRY FALSE)
+endif()
+
+if(NOT TARGET_RASPBERRY)
+  find_package(stonefish_ros2 REQUIRED)
 endif()
 
 # Only download and link navigator-lib on Raspberry-compatible targets
@@ -87,8 +90,13 @@ ament_target_dependencies(${PROJECT_NAME}
   rclcpp_lifecycle
   sensor_msgs
   std_msgs
-  stonefish_ros2
 )
+
+if(NOT TARGET_RASPBERRY)
+  ament_target_dependencies(${PROJECT_NAME}
+    stonefish_ros2
+  )
+endif()
 
 pluginlib_export_plugin_description_file(
   hardware_interface
