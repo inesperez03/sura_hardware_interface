@@ -10,7 +10,9 @@ find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(stonefish_ros2 REQUIRED)
 
 include(ExternalProject)
 
@@ -52,6 +54,7 @@ add_library(${PROJECT_NAME} SHARED
   src/sensors/imu_interface.cpp
   src/sensors/magnetometer_interface.cpp
   src/sensors/pressure_interface.cpp
+  src/sensors/battery_interface.cpp
   src/sensors/dvl75_interface.cpp
 )
 
@@ -82,7 +85,9 @@ ament_target_dependencies(${PROJECT_NAME}
   pluginlib
   rclcpp
   rclcpp_lifecycle
+  sensor_msgs
   std_msgs
+  stonefish_ros2
 )
 
 pluginlib_export_plugin_description_file(

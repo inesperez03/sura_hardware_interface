@@ -1,9 +1,12 @@
 #include "sura_hardware_interface/sensors/sensors_system.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <exception>
+#include <limits>
+#include <string>
 
 #include <pluginlib/class_list_macros.hpp>
-#include <rclcpp/rclcpp.hpp>
 
 namespace sura_hardware_interface
 {
@@ -11,7 +14,57 @@ namespace sura_hardware_interface
 namespace
 {
 const rclcpp::Logger kLogger = rclcpp::get_logger("SensorsSystem");
+
+std::string trim_namespace(std::string value)
+{
+  while (!value.empty() && value.front() == '/') {
+    value.erase(value.begin());
+  }
+
+  while (!value.empty() && value.back() == '/') {
+    value.pop_back();
+  }
+
+  if (value.empty()) {
+    return "cirtesub";
+  }
+
+  return value;
+}
 }  // namespace
+
+std::string SensorsSystem::parameter_or(
+  const std::string & name,
+  const std::string & default_value) const
+{
+  const auto it = info_.hardware_parameters.find(name);
+  if (it == info_.hardware_parameters.end()) {
+    return default_value;
+  }
+
+  return it->second;
+}
+
+double SensorsSystem::parameter_or(const std::string & name, double default_value) const
+{
+  const auto it = info_.hardware_parameters.find(name);
+  if (it == info_.hardware_parameters.end()) {
+    return default_value;
+  }
+
+  try {
+    return std::stod(it->second);
+  } catch (const std::exception & e) {
+    RCLCPP_WARN(
+      kLogger,
+      "Invalid double hardware parameter '%s'='%s': %s. Using %.3f",
+      name.c_str(),
+      it->second.c_str(),
+      e.what(),
+      default_value);
+    return default_value;
+  }
+}
 
 hardware_interface::CallbackReturn SensorsSystem::on_init(
   const hardware_interface::HardwareInfo & info)
@@ -27,6 +80,26 @@ hardware_interface::CallbackReturn SensorsSystem::on_init(
   reset_sensor_state();
   is_active_ = false;
 
+  environment_ = parameter_or("environment", "real");
+  if (environment_ != "sim" && environment_ != "real") {
+    RCLCPP_ERROR(kLogger, "Unsupported environment '%s'. Use 'sim' or 'real'.", environment_.c_str());
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  robot_namespace_ = trim_namespace(parameter_or("robot_namespace", "cirtesub"));
+  const std::string topic_root = "/" + robot_namespace_;
+
+  sim_imu_topic_ = parameter_or("sim_imu_topic", topic_root + "/stonefish/sensors/imu");
+  sim_magnetometer_topic_ =
+    parameter_or("sim_magnetometer_topic", topic_root + "/stonefish/sensors/magnetometer");
+  sim_pressure_topic_ = parameter_or("sim_pressure_topic", topic_root + "/stonefish/sensors/pressure");
+  sim_dvl_topic_ = parameter_or("sim_dvl_topic", topic_root + "/stonefish/sensors/dvl");
+  sim_dvl_altitude_topic_ =
+    parameter_or("sim_dvl_altitude_topic", topic_root + "/stonefish/sensors/dvl/altitude");
+  sim_gps_topic_ = parameter_or("sim_gps_topic", topic_root + "/stonefish/sensors/gps");
+  pressure_offset_pa_ = parameter_or("pressure_offset_pa", 101325.0);
+  sim_dvl_confidence_ = parameter_or("sim_dvl_confidence", 100.0);
+
   const auto has_sensor = [this](const std::string & sensor_name) {
     return std::any_of(
       info_.sensors.begin(),
@@ -39,6 +112,7 @@ hardware_interface::CallbackReturn SensorsSystem::on_init(
   has_imu_ = has_sensor(imu_sensor_name_);
   has_magnetometer_ = has_sensor(magnetometer_sensor_name_);
   has_pressure_ = has_sensor(pressure_sensor_name_);
+  has_battery_ = has_sensor(battery_sensor_name_);
   has_dvl_ = has_sensor(dvl_sensor_name_);
 
   if (!has_imu_) {
@@ -65,6 +139,14 @@ hardware_interface::CallbackReturn SensorsSystem::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  if (!has_battery_) {
+    RCLCPP_ERROR(
+      kLogger,
+      "Sensor '%s' not found in ros2_control description",
+      battery_sensor_name_.c_str());
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
   if (!has_dvl_) {
     RCLCPP_ERROR(
       kLogger,
@@ -75,11 +157,9 @@ hardware_interface::CallbackReturn SensorsSystem::on_init(
 
   RCLCPP_INFO(
     kLogger,
-    "SensorsSystem initialized. IMU='%s', Magnetometer='%s', Pressure='%s', DVL='%s' detected.",
-    imu_sensor_name_.c_str(),
-    magnetometer_sensor_name_.c_str(),
-    pressure_sensor_name_.c_str(),
-    dvl_sensor_name_.c_str());
+    "SensorsSystem initialized for environment='%s', robot_namespace='%s'",
+    environment_.c_str(),
+    robot_namespace_.c_str());
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -89,36 +169,26 @@ hardware_interface::CallbackReturn SensorsSystem::on_configure(
 {
   RCLCPP_INFO(kLogger, "Configuring SensorsSystem...");
 
-  if (!has_imu_) {
-    RCLCPP_ERROR(kLogger, "Cannot configure SensorsSystem because no IMU sensor was detected");
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-
-  if (!has_magnetometer_) {
-    RCLCPP_ERROR(kLogger, "Cannot configure SensorsSystem because no magnetometer sensor was detected");
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-
-  if (!has_pressure_) {
-    RCLCPP_ERROR(kLogger, "Cannot configure SensorsSystem because no pressure sensor was detected");
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-
-  if (!has_dvl_) {
-    RCLCPP_ERROR(kLogger, "Cannot configure SensorsSystem because no DVL sensor was detected");
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-
   reset_sensor_state();
+  reset_sim_subscribers();
 
-  if (!imu_.initialize(info_)) {
-    RCLCPP_ERROR(kLogger, "Failed to initialize IMU interface");
-    return hardware_interface::CallbackReturn::ERROR;
-  }
+  if (environment_ == "sim") {
+    configure_sim_subscribers();
+  } else {
+    if (!imu_.initialize(info_)) {
+      RCLCPP_ERROR(kLogger, "Failed to initialize IMU interface");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
 
-  if (!dvl_.initialize(info_)) {
-    RCLCPP_ERROR(kLogger, "Failed to initialize DVL interface");
-    return hardware_interface::CallbackReturn::ERROR;
+    if (!dvl_.initialize(info_)) {
+      RCLCPP_ERROR(kLogger, "Failed to initialize DVL interface");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+
+    if (!battery_.initialize(info_)) {
+      RCLCPP_ERROR(kLogger, "Failed to initialize battery interface");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
   }
 
   is_active_ = false;
@@ -132,19 +202,21 @@ hardware_interface::CallbackReturn SensorsSystem::on_activate(
 {
   RCLCPP_INFO(kLogger, "Activating SensorsSystem...");
 
-  if (!has_imu_) {
-    RCLCPP_ERROR(kLogger, "Cannot activate SensorsSystem because no IMU sensor was detected");
-    return hardware_interface::CallbackReturn::ERROR;
-  }
+  if (environment_ == "real") {
+    if (!imu_.activate()) {
+      RCLCPP_ERROR(kLogger, "Failed to activate IMU");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
 
-  if (!imu_.activate()) {
-    RCLCPP_ERROR(kLogger, "Failed to activate IMU");
-    return hardware_interface::CallbackReturn::ERROR;
-  }
+    if (!dvl_.activate()) {
+      RCLCPP_ERROR(kLogger, "Failed to activate DVL");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
 
-  if (has_dvl_ && !dvl_.activate()) {
-    RCLCPP_ERROR(kLogger, "Failed to activate DVL");
-    return hardware_interface::CallbackReturn::ERROR;
+    if (!battery_.activate()) {
+      RCLCPP_ERROR(kLogger, "Failed to activate battery");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
   }
 
   is_active_ = true;
@@ -160,14 +232,21 @@ hardware_interface::CallbackReturn SensorsSystem::on_deactivate(
 
   is_active_ = false;
 
-  if (has_imu_ && !imu_.deactivate()) {
-    RCLCPP_ERROR(kLogger, "Failed to deactivate IMU");
-    return hardware_interface::CallbackReturn::ERROR;
-  }
+  if (environment_ == "real") {
+    if (!imu_.deactivate()) {
+      RCLCPP_ERROR(kLogger, "Failed to deactivate IMU");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
 
-  if (has_dvl_ && !dvl_.deactivate()) {
-    RCLCPP_ERROR(kLogger, "Failed to deactivate DVL");
-    return hardware_interface::CallbackReturn::ERROR;
+    if (!dvl_.deactivate()) {
+      RCLCPP_ERROR(kLogger, "Failed to deactivate DVL");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+
+    if (!battery_.deactivate()) {
+      RCLCPP_ERROR(kLogger, "Failed to deactivate battery");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
   }
 
   RCLCPP_INFO(kLogger, "SensorsSystem deactivated");
@@ -182,6 +261,7 @@ std::vector<hardware_interface::StateInterface> SensorsSystem::export_state_inte
     (has_imu_ ? 10U : 0U) +
     (has_magnetometer_ ? 3U : 0U) +
     (has_pressure_ ? 1U : 0U) +
+    (has_battery_ ? 3U : 0U) +
     (has_dvl_ ? 12U : 0U));
 
   if (has_imu_) {
@@ -207,6 +287,12 @@ std::vector<hardware_interface::StateInterface> SensorsSystem::export_state_inte
 
   if (has_pressure_) {
     interfaces.emplace_back(pressure_sensor_name_, "fluid_pressure", &fluid_pressure_);
+  }
+
+  if (has_battery_) {
+    interfaces.emplace_back(battery_sensor_name_, "voltage", &battery_voltage_);
+    interfaces.emplace_back(battery_sensor_name_, "current", &battery_current_);
+    interfaces.emplace_back(battery_sensor_name_, "present", &battery_present_);
   }
 
   if (has_dvl_) {
@@ -242,16 +328,24 @@ hardware_interface::CallbackReturn SensorsSystem::on_cleanup(
 
   is_active_ = false;
 
-  if (has_imu_ && !imu_.cleanup()) {
-    RCLCPP_ERROR(kLogger, "Failed to cleanup IMU");
-    return hardware_interface::CallbackReturn::ERROR;
+  if (environment_ == "real") {
+    if (!imu_.cleanup()) {
+      RCLCPP_ERROR(kLogger, "Failed to cleanup IMU");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+
+    if (!dvl_.cleanup()) {
+      RCLCPP_ERROR(kLogger, "Failed to cleanup DVL");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+
+    if (!battery_.cleanup()) {
+      RCLCPP_ERROR(kLogger, "Failed to cleanup battery");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
   }
 
-  if (has_dvl_ && !dvl_.cleanup()) {
-    RCLCPP_ERROR(kLogger, "Failed to cleanup DVL");
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-
+  reset_sim_subscribers();
   reset_sensor_state();
 
   RCLCPP_INFO(kLogger, "SensorsSystem cleaned up");
@@ -265,16 +359,16 @@ hardware_interface::CallbackReturn SensorsSystem::on_shutdown(
 
   is_active_ = false;
 
-  if (has_imu_) {
+  if (environment_ == "real") {
     (void)imu_.deactivate();
     (void)imu_.cleanup();
-  }
-
-  if (has_dvl_) {
     (void)dvl_.deactivate();
     (void)dvl_.cleanup();
+    (void)battery_.deactivate();
+    (void)battery_.cleanup();
   }
 
+  reset_sim_subscribers();
   reset_sensor_state();
 
   RCLCPP_INFO(kLogger, "SensorsSystem shutdown completed");
@@ -288,16 +382,16 @@ hardware_interface::CallbackReturn SensorsSystem::on_error(
 
   is_active_ = false;
 
-  if (has_imu_) {
+  if (environment_ == "real") {
     (void)imu_.deactivate();
     (void)imu_.cleanup();
-  }
-
-  if (has_dvl_) {
     (void)dvl_.deactivate();
     (void)dvl_.cleanup();
+    (void)battery_.deactivate();
+    (void)battery_.cleanup();
   }
 
+  reset_sim_subscribers();
   reset_sensor_state();
 
   return hardware_interface::CallbackReturn::SUCCESS;
@@ -311,72 +405,90 @@ hardware_interface::return_type SensorsSystem::read(
     return hardware_interface::return_type::OK;
   }
 
-  if (has_imu_) {
-    const bool imu_ok = imu_.read(
-      orientation_x_, orientation_y_, orientation_z_, orientation_w_,
-      angular_velocity_x_, angular_velocity_y_, angular_velocity_z_,
-      linear_acceleration_x_, linear_acceleration_y_, linear_acceleration_z_);
-
-    if (!imu_ok) {
-      RCLCPP_ERROR(kLogger, "Failed to read IMU data");
-      return hardware_interface::return_type::ERROR;
+  if (environment_ == "sim") {
+    if (sim_node_) {
+      rclcpp::spin_some(sim_node_);
     }
+    return hardware_interface::return_type::OK;
   }
 
-  if (has_magnetometer_) {
-    const bool mag_ok = magnetometer_.read(
-      magnetic_field_x_, magnetic_field_y_, magnetic_field_z_);
+  const bool imu_ok = imu_.read(
+    orientation_x_, orientation_y_, orientation_z_, orientation_w_,
+    angular_velocity_x_, angular_velocity_y_, angular_velocity_z_,
+    linear_acceleration_x_, linear_acceleration_y_, linear_acceleration_z_);
 
-    if (!mag_ok) {
-      RCLCPP_ERROR(kLogger, "Failed to read magnetometer data");
-      return hardware_interface::return_type::ERROR;
-    }
+  if (!imu_ok) {
+    RCLCPP_ERROR(kLogger, "Failed to read IMU data");
+    return hardware_interface::return_type::ERROR;
   }
 
-  if (has_pressure_) {
-    const bool pressure_ok = pressure_.read(fluid_pressure_);
+  const bool mag_ok = magnetometer_.read(
+    magnetic_field_x_, magnetic_field_y_, magnetic_field_z_);
 
-    if (!pressure_ok) {
-      RCLCPP_ERROR(kLogger, "Failed to read pressure data");
-      return hardware_interface::return_type::ERROR;
-    }
+  if (!mag_ok) {
+    RCLCPP_ERROR(kLogger, "Failed to read magnetometer data");
+    return hardware_interface::return_type::ERROR;
   }
 
-  if (has_dvl_) {
-    const bool dvl_ok = dvl_.read(
-      dvl_linear_velocity_x_,
-      dvl_linear_velocity_y_,
-      dvl_linear_velocity_z_,
-      dvl_angular_velocity_x_,
-      dvl_angular_velocity_y_,
-      dvl_angular_velocity_z_,
-      dvl_distance_z_,
-      dvl_confidence_,
-      dvl_gps_latitude_,
-      dvl_gps_longitude_,
-      dvl_gps_altitude_,
-      dvl_gps_valid_);
+  double pressure_mbar = 0.0;
+  const bool pressure_ok = pressure_.read(pressure_mbar);
 
-    if (!dvl_ok) {
-      RCLCPP_WARN_THROTTLE(
-        kLogger,
-        *rclcpp::Clock::make_shared(),
-        1000,
-        "Failed to read DVL data");
+  if (!pressure_ok) {
+    RCLCPP_ERROR(kLogger, "Failed to read pressure data");
+    return hardware_interface::return_type::ERROR;
+  }
 
-      dvl_linear_velocity_x_ = 0.0;
-      dvl_linear_velocity_y_ = 0.0;
-      dvl_linear_velocity_z_ = 0.0;
+  const double pressure_pa = pressure_mbar * 100.0;
+  fluid_pressure_ = std::max(0.0, pressure_pa - pressure_offset_pa_);
 
-      dvl_angular_velocity_x_ = 0.0;
-      dvl_angular_velocity_y_ = 0.0;
-      dvl_angular_velocity_z_ = 0.0;
+  const bool battery_ok = battery_.read(
+    battery_voltage_, battery_current_, battery_present_);
 
-      dvl_distance_z_ = 0.0;
-      dvl_confidence_ = 0.0;
+  if (!battery_ok) {
+    RCLCPP_WARN_THROTTLE(
+      kLogger,
+      *rclcpp::Clock::make_shared(),
+      1000,
+      "Failed to read battery data");
 
-      dvl_gps_valid_ = 0.0;
-    }
+    battery_voltage_ = std::numeric_limits<double>::quiet_NaN();
+    battery_current_ = std::numeric_limits<double>::quiet_NaN();
+    battery_present_ = 0.0;
+  }
+
+  const bool dvl_ok = dvl_.read(
+    dvl_linear_velocity_x_,
+    dvl_linear_velocity_y_,
+    dvl_linear_velocity_z_,
+    dvl_angular_velocity_x_,
+    dvl_angular_velocity_y_,
+    dvl_angular_velocity_z_,
+    dvl_distance_z_,
+    dvl_confidence_,
+    dvl_gps_latitude_,
+    dvl_gps_longitude_,
+    dvl_gps_altitude_,
+    dvl_gps_valid_);
+
+  if (!dvl_ok) {
+    RCLCPP_WARN_THROTTLE(
+      kLogger,
+      *rclcpp::Clock::make_shared(),
+      1000,
+      "Failed to read DVL data");
+
+    dvl_linear_velocity_x_ = 0.0;
+    dvl_linear_velocity_y_ = 0.0;
+    dvl_linear_velocity_z_ = 0.0;
+
+    dvl_angular_velocity_x_ = 0.0;
+    dvl_angular_velocity_y_ = 0.0;
+    dvl_angular_velocity_z_ = 0.0;
+
+    dvl_distance_z_ = 0.0;
+    dvl_confidence_ = 0.0;
+
+    dvl_gps_valid_ = 0.0;
   }
 
   return hardware_interface::return_type::OK;
@@ -387,6 +499,136 @@ hardware_interface::return_type SensorsSystem::write(
   const rclcpp::Duration &)
 {
   return hardware_interface::return_type::OK;
+}
+
+void SensorsSystem::configure_sim_subscribers()
+{
+  sim_node_ = std::make_shared<rclcpp::Node>(
+    "sura_sensors_system_sim_" + robot_namespace_);
+
+  sim_imu_sub_ = sim_node_->create_subscription<sensor_msgs::msg::Imu>(
+    sim_imu_topic_, rclcpp::SensorDataQoS(),
+    [this](const sensor_msgs::msg::Imu::SharedPtr msg) {
+      sim_imu_callback(msg);
+    });
+
+  sim_magnetometer_sub_ = sim_node_->create_subscription<sensor_msgs::msg::MagneticField>(
+    sim_magnetometer_topic_, rclcpp::SensorDataQoS(),
+    [this](const sensor_msgs::msg::MagneticField::SharedPtr msg) {
+      sim_magnetometer_callback(msg);
+    });
+
+  sim_pressure_sub_ = sim_node_->create_subscription<sensor_msgs::msg::FluidPressure>(
+    sim_pressure_topic_, rclcpp::SensorDataQoS(),
+    [this](const sensor_msgs::msg::FluidPressure::SharedPtr msg) {
+      sim_pressure_callback(msg);
+    });
+
+  sim_dvl_sub_ = sim_node_->create_subscription<stonefish_ros2::msg::DVL>(
+    sim_dvl_topic_, rclcpp::SensorDataQoS(),
+    [this](const stonefish_ros2::msg::DVL::SharedPtr msg) {
+      sim_dvl_callback(msg);
+    });
+
+  sim_dvl_altitude_sub_ = sim_node_->create_subscription<sensor_msgs::msg::Range>(
+    sim_dvl_altitude_topic_, rclcpp::SensorDataQoS(),
+    [this](const sensor_msgs::msg::Range::SharedPtr msg) {
+      sim_dvl_altitude_callback(msg);
+    });
+
+  sim_gps_sub_ = sim_node_->create_subscription<sensor_msgs::msg::NavSatFix>(
+    sim_gps_topic_, rclcpp::SensorDataQoS(),
+    [this](const sensor_msgs::msg::NavSatFix::SharedPtr msg) {
+      sim_gps_callback(msg);
+    });
+
+  RCLCPP_INFO(
+    kLogger,
+    "Configured simulation sensor subscribers: imu='%s', mag='%s', pressure='%s', dvl='%s', altitude='%s', gps='%s'",
+    sim_imu_topic_.c_str(),
+    sim_magnetometer_topic_.c_str(),
+    sim_pressure_topic_.c_str(),
+    sim_dvl_topic_.c_str(),
+    sim_dvl_altitude_topic_.c_str(),
+    sim_gps_topic_.c_str());
+}
+
+void SensorsSystem::reset_sim_subscribers()
+{
+  sim_imu_sub_.reset();
+  sim_magnetometer_sub_.reset();
+  sim_pressure_sub_.reset();
+  sim_dvl_sub_.reset();
+  sim_dvl_altitude_sub_.reset();
+  sim_gps_sub_.reset();
+  sim_node_.reset();
+}
+
+void SensorsSystem::sim_imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg)
+{
+  orientation_x_ = msg->orientation.x;
+  orientation_y_ = msg->orientation.y;
+  orientation_z_ = msg->orientation.z;
+  orientation_w_ = msg->orientation.w;
+
+  angular_velocity_x_ = msg->angular_velocity.x;
+  angular_velocity_y_ = msg->angular_velocity.y;
+  angular_velocity_z_ = msg->angular_velocity.z;
+
+  linear_acceleration_x_ = msg->linear_acceleration.x;
+  linear_acceleration_y_ = msg->linear_acceleration.y;
+  linear_acceleration_z_ = msg->linear_acceleration.z;
+}
+
+void SensorsSystem::sim_magnetometer_callback(
+  const sensor_msgs::msg::MagneticField::SharedPtr msg)
+{
+  magnetic_field_x_ = msg->magnetic_field.x;
+  magnetic_field_y_ = msg->magnetic_field.y;
+  magnetic_field_z_ = msg->magnetic_field.z;
+}
+
+void SensorsSystem::sim_pressure_callback(
+  const sensor_msgs::msg::FluidPressure::SharedPtr msg)
+{
+  fluid_pressure_ = msg->fluid_pressure;
+}
+
+void SensorsSystem::sim_dvl_callback(const stonefish_ros2::msg::DVL::SharedPtr msg)
+{
+  dvl_linear_velocity_x_ = msg->velocity.x;
+  dvl_linear_velocity_y_ = msg->velocity.y;
+  dvl_linear_velocity_z_ = msg->velocity.z;
+
+  dvl_angular_velocity_x_ = 0.0;
+  dvl_angular_velocity_y_ = 0.0;
+  dvl_angular_velocity_z_ = 0.0;
+
+  if (std::isfinite(msg->altitude) && msg->altitude >= 0.0) {
+    dvl_distance_z_ = msg->altitude;
+    dvl_confidence_ = sim_dvl_confidence_;
+  } else {
+    dvl_confidence_ = 0.0;
+  }
+}
+
+void SensorsSystem::sim_dvl_altitude_callback(
+  const sensor_msgs::msg::Range::SharedPtr msg)
+{
+  if (std::isfinite(msg->range) && msg->range >= 0.0) {
+    dvl_distance_z_ = msg->range;
+    dvl_confidence_ = sim_dvl_confidence_;
+  } else {
+    dvl_confidence_ = 0.0;
+  }
+}
+
+void SensorsSystem::sim_gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg)
+{
+  dvl_gps_latitude_ = msg->latitude;
+  dvl_gps_longitude_ = msg->longitude;
+  dvl_gps_altitude_ = msg->altitude;
+  dvl_gps_valid_ = msg->status.status >= sensor_msgs::msg::NavSatStatus::STATUS_FIX ? 1.0 : 0.0;
 }
 
 void SensorsSystem::reset_sensor_state()
@@ -409,6 +651,10 @@ void SensorsSystem::reset_sensor_state()
   magnetic_field_z_ = 0.0;
 
   fluid_pressure_ = 0.0;
+
+  battery_voltage_ = std::numeric_limits<double>::quiet_NaN();
+  battery_current_ = std::numeric_limits<double>::quiet_NaN();
+  battery_present_ = 0.0;
 
   dvl_linear_velocity_x_ = 0.0;
   dvl_linear_velocity_y_ = 0.0;
