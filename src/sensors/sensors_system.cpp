@@ -131,14 +131,6 @@ hardware_interface::CallbackReturn SensorsSystem::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
-  if (!has_pressure_) {
-    RCLCPP_ERROR(
-      kLogger,
-      "Sensor '%s' not found in ros2_control description",
-      pressure_sensor_name_.c_str());
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-
   if (!has_battery_) {
     RCLCPP_ERROR(
       kLogger,
@@ -147,12 +139,18 @@ hardware_interface::CallbackReturn SensorsSystem::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
-  if (!has_dvl_) {
-    RCLCPP_ERROR(
+  if (!has_pressure_) {
+    RCLCPP_WARN(
       kLogger,
-      "Sensor '%s' not found in ros2_control description",
+      "Optional sensor '%s' not found in ros2_control description",
+      pressure_sensor_name_.c_str());
+  }
+
+  if (!has_dvl_) {
+    RCLCPP_WARN(
+      kLogger,
+      "Optional sensor '%s' not found in ros2_control description",
       dvl_sensor_name_.c_str());
-    return hardware_interface::CallbackReturn::ERROR;
   }
 
   RCLCPP_INFO(
@@ -180,7 +178,7 @@ hardware_interface::CallbackReturn SensorsSystem::on_configure(
       return hardware_interface::CallbackReturn::ERROR;
     }
 
-    if (!dvl_.initialize(info_)) {
+    if (has_dvl_ && !dvl_.initialize(info_)) {
       RCLCPP_ERROR(kLogger, "Failed to initialize DVL interface");
       return hardware_interface::CallbackReturn::ERROR;
     }
@@ -208,7 +206,7 @@ hardware_interface::CallbackReturn SensorsSystem::on_activate(
       return hardware_interface::CallbackReturn::ERROR;
     }
 
-    if (!dvl_.activate()) {
+    if (has_dvl_ && !dvl_.activate()) {
       RCLCPP_ERROR(kLogger, "Failed to activate DVL");
       return hardware_interface::CallbackReturn::ERROR;
     }
@@ -238,7 +236,7 @@ hardware_interface::CallbackReturn SensorsSystem::on_deactivate(
       return hardware_interface::CallbackReturn::ERROR;
     }
 
-    if (!dvl_.deactivate()) {
+    if (has_dvl_ && !dvl_.deactivate()) {
       RCLCPP_ERROR(kLogger, "Failed to deactivate DVL");
       return hardware_interface::CallbackReturn::ERROR;
     }
@@ -334,7 +332,7 @@ hardware_interface::CallbackReturn SensorsSystem::on_cleanup(
       return hardware_interface::CallbackReturn::ERROR;
     }
 
-    if (!dvl_.cleanup()) {
+    if (has_dvl_ && !dvl_.cleanup()) {
       RCLCPP_ERROR(kLogger, "Failed to cleanup DVL");
       return hardware_interface::CallbackReturn::ERROR;
     }
@@ -362,8 +360,10 @@ hardware_interface::CallbackReturn SensorsSystem::on_shutdown(
   if (environment_ == "real") {
     (void)imu_.deactivate();
     (void)imu_.cleanup();
-    (void)dvl_.deactivate();
-    (void)dvl_.cleanup();
+    if (has_dvl_) {
+      (void)dvl_.deactivate();
+      (void)dvl_.cleanup();
+    }
     (void)battery_.deactivate();
     (void)battery_.cleanup();
   }
@@ -385,8 +385,10 @@ hardware_interface::CallbackReturn SensorsSystem::on_error(
   if (environment_ == "real") {
     (void)imu_.deactivate();
     (void)imu_.cleanup();
-    (void)dvl_.deactivate();
-    (void)dvl_.cleanup();
+    if (has_dvl_) {
+      (void)dvl_.deactivate();
+      (void)dvl_.cleanup();
+    }
     (void)battery_.deactivate();
     (void)battery_.cleanup();
   }
@@ -430,16 +432,18 @@ hardware_interface::return_type SensorsSystem::read(
     return hardware_interface::return_type::ERROR;
   }
 
-  double pressure_mbar = 0.0;
-  const bool pressure_ok = pressure_.read(pressure_mbar);
+  if (has_pressure_) {
+    double pressure_mbar = 0.0;
+    const bool pressure_ok = pressure_.read(pressure_mbar);
 
-  if (!pressure_ok) {
-    RCLCPP_ERROR(kLogger, "Failed to read pressure data");
-    return hardware_interface::return_type::ERROR;
+    if (!pressure_ok) {
+      RCLCPP_ERROR(kLogger, "Failed to read pressure data");
+      return hardware_interface::return_type::ERROR;
+    }
+
+    const double pressure_pa = pressure_mbar * 100.0;
+    fluid_pressure_ = std::max(0.0, pressure_pa - pressure_offset_pa_);
   }
-
-  const double pressure_pa = pressure_mbar * 100.0;
-  fluid_pressure_ = std::max(0.0, pressure_pa - pressure_offset_pa_);
 
   const bool battery_ok = battery_.read(
     battery_voltage_, battery_current_, battery_present_);
@@ -456,39 +460,41 @@ hardware_interface::return_type SensorsSystem::read(
     battery_present_ = 0.0;
   }
 
-  const bool dvl_ok = dvl_.read(
-    dvl_linear_velocity_x_,
-    dvl_linear_velocity_y_,
-    dvl_linear_velocity_z_,
-    dvl_angular_velocity_x_,
-    dvl_angular_velocity_y_,
-    dvl_angular_velocity_z_,
-    dvl_distance_z_,
-    dvl_confidence_,
-    dvl_gps_latitude_,
-    dvl_gps_longitude_,
-    dvl_gps_altitude_,
-    dvl_gps_valid_);
+  if (has_dvl_) {
+    const bool dvl_ok = dvl_.read(
+      dvl_linear_velocity_x_,
+      dvl_linear_velocity_y_,
+      dvl_linear_velocity_z_,
+      dvl_angular_velocity_x_,
+      dvl_angular_velocity_y_,
+      dvl_angular_velocity_z_,
+      dvl_distance_z_,
+      dvl_confidence_,
+      dvl_gps_latitude_,
+      dvl_gps_longitude_,
+      dvl_gps_altitude_,
+      dvl_gps_valid_);
 
-  if (!dvl_ok) {
-    RCLCPP_WARN_THROTTLE(
-      kLogger,
-      *rclcpp::Clock::make_shared(),
-      1000,
-      "Failed to read DVL data");
+    if (!dvl_ok) {
+      RCLCPP_WARN_THROTTLE(
+        kLogger,
+        *rclcpp::Clock::make_shared(),
+        1000,
+        "Failed to read DVL data");
 
-    dvl_linear_velocity_x_ = 0.0;
-    dvl_linear_velocity_y_ = 0.0;
-    dvl_linear_velocity_z_ = 0.0;
+      dvl_linear_velocity_x_ = 0.0;
+      dvl_linear_velocity_y_ = 0.0;
+      dvl_linear_velocity_z_ = 0.0;
 
-    dvl_angular_velocity_x_ = 0.0;
-    dvl_angular_velocity_y_ = 0.0;
-    dvl_angular_velocity_z_ = 0.0;
+      dvl_angular_velocity_x_ = 0.0;
+      dvl_angular_velocity_y_ = 0.0;
+      dvl_angular_velocity_z_ = 0.0;
 
-    dvl_distance_z_ = 0.0;
-    dvl_confidence_ = 0.0;
+      dvl_distance_z_ = 0.0;
+      dvl_confidence_ = 0.0;
 
-    dvl_gps_valid_ = 0.0;
+      dvl_gps_valid_ = 0.0;
+    }
   }
 
   return hardware_interface::return_type::OK;
