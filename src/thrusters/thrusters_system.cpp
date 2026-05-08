@@ -340,18 +340,6 @@ hardware_interface::CallbackReturn ThrustersSystem::on_cleanup(
 
   publish_zero_command();
 
-#ifdef TARGET_RASPBERRY
-  if (environment_ == "real" && navigator_initialized_) {
-    try {
-      set_pwm_enable(false);
-    } catch (const std::exception & e) {
-      RCLCPP_ERROR(kLogger, "Failed to disable PWM during cleanup: %s", e.what());
-    } catch (...) {
-      RCLCPP_ERROR(kLogger, "Failed to disable PWM during cleanup: unknown error");
-    }
-  }
-#endif
-
   pwm_enabled_ = false;
   navigator_initialized_ = false;
 
@@ -381,18 +369,6 @@ hardware_interface::CallbackReturn ThrustersSystem::on_shutdown(
   reset_thruster_filter();
 
   publish_zero_command();
-
-#ifdef TARGET_RASPBERRY
-  if (environment_ == "real" && navigator_initialized_) {
-    try {
-      set_pwm_enable(false);
-    } catch (const std::exception & e) {
-      RCLCPP_ERROR(kLogger, "Failed to disable PWM during shutdown: %s", e.what());
-    } catch (...) {
-      RCLCPP_ERROR(kLogger, "Failed to disable PWM during shutdown: unknown error");
-    }
-  }
-#endif
 
   pwm_enabled_ = false;
   navigator_initialized_ = false;
@@ -437,19 +413,6 @@ hardware_interface::CallbackReturn ThrustersSystem::on_deactivate(
   reset_thruster_filter();
 
   publish_zero_command();
-
-#ifdef TARGET_RASPBERRY
-  if (environment_ == "real" && navigator_initialized_) {
-    try {
-      set_pwm_enable(false);
-      pwm_enabled_ = false;
-    } catch (const std::exception & e) {
-      RCLCPP_ERROR(kLogger, "Failed to disable PWM during deactivation: %s", e.what());
-    } catch (...) {
-      RCLCPP_ERROR(kLogger, "Failed to disable PWM during deactivation: unknown error");
-    }
-  }
-#endif
 
   RCLCPP_INFO(kLogger, "ThrustersSystem deactivated");
   return hardware_interface::CallbackReturn::SUCCESS;
