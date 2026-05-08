@@ -12,6 +12,7 @@
 #include "sura_hardware_interface/sensors/imu_interface.hpp"
 #include "sura_hardware_interface/sensors/magnetometer_interface.hpp"
 #include "sura_hardware_interface/sensors/pressure_interface.hpp"
+#include "sura_hardware_interface/sensors/dvl75_interface.hpp"
 
 namespace sura_hardware_interface
 {
@@ -61,15 +62,18 @@ private:
   ImuInterface imu_;
   MagnetometerInterface magnetometer_;
   PressureInterface pressure_;
+  DvlInterface dvl_;
 
   bool has_imu_{false};
   bool has_magnetometer_{false};
   bool has_pressure_{false};
+  bool has_dvl_{false};
   bool is_active_{false};
 
   std::string imu_sensor_name_{"imu_sensor"};
   std::string magnetometer_sensor_name_{"magnetometer_sensor"};
   std::string pressure_sensor_name_{"pressure_sensor"};
+  std::string dvl_sensor_name_{"dvl_sensor"};
 
   double orientation_x_{0.0};
   double orientation_y_{0.0};
@@ -89,6 +93,22 @@ private:
   double magnetic_field_z_{0.0};
 
   double fluid_pressure_{0.0};
+
+  double dvl_distance_z_{0.0};
+  double dvl_confidence_{0.0};
+
+  double dvl_linear_velocity_x_{0.0};
+  double dvl_linear_velocity_y_{0.0};
+  double dvl_linear_velocity_z_{0.0};
+
+  double dvl_angular_velocity_x_{0.0};
+  double dvl_angular_velocity_y_{0.0};
+  double dvl_angular_velocity_z_{0.0};
+
+  double dvl_gps_latitude_{0.0};
+  double dvl_gps_longitude_{0.0};
+  double dvl_gps_altitude_{0.0};
+  double dvl_gps_valid_{0.0};
 };
 
 }  // namespace sura_hardware_interface
