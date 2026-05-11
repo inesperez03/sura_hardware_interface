@@ -1,7 +1,11 @@
 #pragma once
 
 #include <memory>
+#include <atomic>
+#include <chrono>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <hardware_interface/hardware_info.hpp>
@@ -71,6 +75,14 @@ private:
   void reset_sensor_state();
   void configure_sim_subscribers();
   void reset_sim_subscribers();
+  void start_real_sensor_threads();
+  void stop_real_sensor_threads();
+  void pressure_poll_loop();
+  void battery_poll_loop();
+  void dvl_poll_loop();
+  void poll_pressure_once();
+  void poll_battery_once();
+  void poll_dvl_once();
   std::string parameter_or(const std::string & name, const std::string & default_value) const;
   double parameter_or(const std::string & name, double default_value) const;
 
@@ -110,6 +122,34 @@ private:
   std::string sim_gps_topic_;
   double pressure_offset_pa_{101325.0};
   double sim_dvl_confidence_{100.0};
+  double pressure_read_rate_hz_{100.0};
+  double dvl_read_rate_hz_{50.0};
+  double battery_read_rate_hz_{1.0};
+
+  std::atomic_bool real_sensor_threads_running_{false};
+  std::thread pressure_thread_;
+  std::thread battery_thread_;
+  std::thread dvl_thread_;
+  std::mutex real_sensor_cache_mutex_;
+
+  double cached_fluid_pressure_{0.0};
+
+  double cached_battery_voltage_{0.0};
+  double cached_battery_current_{0.0};
+  double cached_battery_present_{0.0};
+
+  double cached_dvl_distance_z_{0.0};
+  double cached_dvl_confidence_{0.0};
+  double cached_dvl_linear_velocity_x_{0.0};
+  double cached_dvl_linear_velocity_y_{0.0};
+  double cached_dvl_linear_velocity_z_{0.0};
+  double cached_dvl_angular_velocity_x_{0.0};
+  double cached_dvl_angular_velocity_y_{0.0};
+  double cached_dvl_angular_velocity_z_{0.0};
+  double cached_dvl_gps_latitude_{0.0};
+  double cached_dvl_gps_longitude_{0.0};
+  double cached_dvl_gps_altitude_{0.0};
+  double cached_dvl_gps_valid_{0.0};
 
   rclcpp::Node::SharedPtr sim_node_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sim_imu_sub_;

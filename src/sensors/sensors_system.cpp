@@ -1,6 +1,7 @@
 #include "sura_hardware_interface/sensors/sensors_system.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <exception>
 #include <limits>
@@ -66,6 +67,19 @@ double SensorsSystem::parameter_or(const std::string & name, double default_valu
   }
 }
 
+namespace
+{
+std::chrono::steady_clock::duration period_from_rate(double rate_hz)
+{
+  if (!std::isfinite(rate_hz) || rate_hz <= 0.0) {
+    return std::chrono::steady_clock::duration::max();
+  }
+
+  return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+    std::chrono::duration<double>(1.0 / rate_hz));
+}
+}  // namespace
+
 hardware_interface::CallbackReturn SensorsSystem::on_init(
   const hardware_interface::HardwareInfo & info)
 {
@@ -99,6 +113,9 @@ hardware_interface::CallbackReturn SensorsSystem::on_init(
   sim_gps_topic_ = parameter_or("sim_gps_topic", topic_root + "/stonefish/sensors/gps");
   pressure_offset_pa_ = parameter_or("pressure_offset_pa", 101325.0);
   sim_dvl_confidence_ = parameter_or("sim_dvl_confidence", 100.0);
+  pressure_read_rate_hz_ = parameter_or("pressure_read_rate_hz", 100.0);
+  dvl_read_rate_hz_ = parameter_or("dvl_read_rate_hz", 50.0);
+  battery_read_rate_hz_ = parameter_or("battery_read_rate_hz", 1.0);
 
   const auto has_sensor = [this](const std::string & sensor_name) {
     return std::any_of(
@@ -217,6 +234,11 @@ hardware_interface::CallbackReturn SensorsSystem::on_activate(
       RCLCPP_ERROR(kLogger, "Failed to activate battery");
       return hardware_interface::CallbackReturn::ERROR;
     }
+
+    poll_pressure_once();
+    poll_battery_once();
+    poll_dvl_once();
+    start_real_sensor_threads();
   }
 
   is_active_ = true;
@@ -233,6 +255,8 @@ hardware_interface::CallbackReturn SensorsSystem::on_deactivate(
   is_active_ = false;
 
   if (environment_ == "real") {
+    stop_real_sensor_threads();
+
     if (!imu_.deactivate()) {
       RCLCPP_ERROR(kLogger, "Failed to deactivate IMU");
       return hardware_interface::CallbackReturn::ERROR;
@@ -329,6 +353,8 @@ hardware_interface::CallbackReturn SensorsSystem::on_cleanup(
   is_active_ = false;
 
   if (environment_ == "real") {
+    stop_real_sensor_threads();
+
     if (!imu_.cleanup()) {
       RCLCPP_ERROR(kLogger, "Failed to cleanup IMU");
       return hardware_interface::CallbackReturn::ERROR;
@@ -360,6 +386,8 @@ hardware_interface::CallbackReturn SensorsSystem::on_shutdown(
   is_active_ = false;
 
   if (environment_ == "real") {
+    stop_real_sensor_threads();
+
     (void)imu_.deactivate();
     (void)imu_.cleanup();
     (void)dvl_.deactivate();
@@ -383,6 +411,8 @@ hardware_interface::CallbackReturn SensorsSystem::on_error(
   is_active_ = false;
 
   if (environment_ == "real") {
+    stop_real_sensor_threads();
+
     (void)imu_.deactivate();
     (void)imu_.cleanup();
     (void)dvl_.deactivate();
@@ -430,68 +460,186 @@ hardware_interface::return_type SensorsSystem::read(
     return hardware_interface::return_type::ERROR;
   }
 
-  double pressure_mbar = 0.0;
-  const bool pressure_ok = pressure_.read(pressure_mbar);
+  {
+    std::lock_guard<std::mutex> lock(real_sensor_cache_mutex_);
 
-  if (!pressure_ok) {
-    RCLCPP_ERROR(kLogger, "Failed to read pressure data");
-    return hardware_interface::return_type::ERROR;
-  }
+    fluid_pressure_ = cached_fluid_pressure_;
 
-  const double pressure_pa = pressure_mbar * 100.0;
-  fluid_pressure_ = std::max(0.0, pressure_pa - pressure_offset_pa_);
+    battery_voltage_ = cached_battery_voltage_;
+    battery_current_ = cached_battery_current_;
+    battery_present_ = cached_battery_present_;
 
-  const bool battery_ok = battery_.read(
-    battery_voltage_, battery_current_, battery_present_);
-
-  if (!battery_ok) {
-    RCLCPP_WARN_THROTTLE(
-      kLogger,
-      *rclcpp::Clock::make_shared(),
-      1000,
-      "Failed to read battery data");
-
-    battery_voltage_ = std::numeric_limits<double>::quiet_NaN();
-    battery_current_ = std::numeric_limits<double>::quiet_NaN();
-    battery_present_ = 0.0;
-  }
-
-  const bool dvl_ok = dvl_.read(
-    dvl_linear_velocity_x_,
-    dvl_linear_velocity_y_,
-    dvl_linear_velocity_z_,
-    dvl_angular_velocity_x_,
-    dvl_angular_velocity_y_,
-    dvl_angular_velocity_z_,
-    dvl_distance_z_,
-    dvl_confidence_,
-    dvl_gps_latitude_,
-    dvl_gps_longitude_,
-    dvl_gps_altitude_,
-    dvl_gps_valid_);
-
-  if (!dvl_ok) {
-    RCLCPP_WARN_THROTTLE(
-      kLogger,
-      *rclcpp::Clock::make_shared(),
-      1000,
-      "Failed to read DVL data");
-
-    dvl_linear_velocity_x_ = 0.0;
-    dvl_linear_velocity_y_ = 0.0;
-    dvl_linear_velocity_z_ = 0.0;
-
-    dvl_angular_velocity_x_ = 0.0;
-    dvl_angular_velocity_y_ = 0.0;
-    dvl_angular_velocity_z_ = 0.0;
-
-    dvl_distance_z_ = 0.0;
-    dvl_confidence_ = 0.0;
-
-    dvl_gps_valid_ = 0.0;
+    dvl_linear_velocity_x_ = cached_dvl_linear_velocity_x_;
+    dvl_linear_velocity_y_ = cached_dvl_linear_velocity_y_;
+    dvl_linear_velocity_z_ = cached_dvl_linear_velocity_z_;
+    dvl_angular_velocity_x_ = cached_dvl_angular_velocity_x_;
+    dvl_angular_velocity_y_ = cached_dvl_angular_velocity_y_;
+    dvl_angular_velocity_z_ = cached_dvl_angular_velocity_z_;
+    dvl_distance_z_ = cached_dvl_distance_z_;
+    dvl_confidence_ = cached_dvl_confidence_;
+    dvl_gps_latitude_ = cached_dvl_gps_latitude_;
+    dvl_gps_longitude_ = cached_dvl_gps_longitude_;
+    dvl_gps_altitude_ = cached_dvl_gps_altitude_;
+    dvl_gps_valid_ = cached_dvl_gps_valid_;
   }
 
   return hardware_interface::return_type::OK;
+}
+
+void SensorsSystem::start_real_sensor_threads()
+{
+  stop_real_sensor_threads();
+
+  real_sensor_threads_running_.store(true);
+
+  pressure_thread_ = std::thread(&SensorsSystem::pressure_poll_loop, this);
+  battery_thread_ = std::thread(&SensorsSystem::battery_poll_loop, this);
+  dvl_thread_ = std::thread(&SensorsSystem::dvl_poll_loop, this);
+}
+
+void SensorsSystem::stop_real_sensor_threads()
+{
+  real_sensor_threads_running_.store(false);
+
+  if (pressure_thread_.joinable()) {
+    pressure_thread_.join();
+  }
+
+  if (battery_thread_.joinable()) {
+    battery_thread_.join();
+  }
+
+  if (dvl_thread_.joinable()) {
+    dvl_thread_.join();
+  }
+}
+
+void SensorsSystem::pressure_poll_loop()
+{
+  const auto period = period_from_rate(pressure_read_rate_hz_);
+  auto next = std::chrono::steady_clock::now();
+
+  while (real_sensor_threads_running_.load()) {
+    poll_pressure_once();
+
+    if (period == std::chrono::steady_clock::duration::max()) {
+      break;
+    }
+
+    next += period;
+    std::this_thread::sleep_until(next);
+  }
+}
+
+void SensorsSystem::battery_poll_loop()
+{
+  const auto period = period_from_rate(battery_read_rate_hz_);
+  auto next = std::chrono::steady_clock::now();
+
+  while (real_sensor_threads_running_.load()) {
+    poll_battery_once();
+
+    if (period == std::chrono::steady_clock::duration::max()) {
+      break;
+    }
+
+    next += period;
+    std::this_thread::sleep_until(next);
+  }
+}
+
+void SensorsSystem::dvl_poll_loop()
+{
+  const auto period = period_from_rate(dvl_read_rate_hz_);
+  auto next = std::chrono::steady_clock::now();
+
+  while (real_sensor_threads_running_.load()) {
+    poll_dvl_once();
+
+    if (period == std::chrono::steady_clock::duration::max()) {
+      break;
+    }
+
+    next += period;
+    std::this_thread::sleep_until(next);
+  }
+}
+
+void SensorsSystem::poll_pressure_once()
+{
+  double pressure_mbar = 0.0;
+  if (!pressure_.read(pressure_mbar)) {
+    return;
+  }
+
+  const double pressure_pa = pressure_mbar * 100.0;
+  const double fluid_pressure = std::max(0.0, pressure_pa - pressure_offset_pa_);
+
+  std::lock_guard<std::mutex> lock(real_sensor_cache_mutex_);
+  cached_fluid_pressure_ = fluid_pressure;
+}
+
+void SensorsSystem::poll_battery_once()
+{
+  double voltage = std::numeric_limits<double>::quiet_NaN();
+  double current = std::numeric_limits<double>::quiet_NaN();
+  double present = 0.0;
+
+  if (!battery_.read(voltage, current, present)) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(real_sensor_cache_mutex_);
+  cached_battery_voltage_ = voltage;
+  cached_battery_current_ = current;
+  cached_battery_present_ = present;
+}
+
+void SensorsSystem::poll_dvl_once()
+{
+  double linear_velocity_x = 0.0;
+  double linear_velocity_y = 0.0;
+  double linear_velocity_z = 0.0;
+  double angular_velocity_x = 0.0;
+  double angular_velocity_y = 0.0;
+  double angular_velocity_z = 0.0;
+  double distance_z = 0.0;
+  double confidence = 0.0;
+  double gps_latitude = 0.0;
+  double gps_longitude = 0.0;
+  double gps_altitude = 0.0;
+  double gps_valid = 0.0;
+
+  if (!dvl_.read(
+      linear_velocity_x,
+      linear_velocity_y,
+      linear_velocity_z,
+      angular_velocity_x,
+      angular_velocity_y,
+      angular_velocity_z,
+      distance_z,
+      confidence,
+      gps_latitude,
+      gps_longitude,
+      gps_altitude,
+      gps_valid))
+  {
+    gps_valid = 0.0;
+  }
+
+  std::lock_guard<std::mutex> lock(real_sensor_cache_mutex_);
+  cached_dvl_linear_velocity_x_ = linear_velocity_x;
+  cached_dvl_linear_velocity_y_ = linear_velocity_y;
+  cached_dvl_linear_velocity_z_ = linear_velocity_z;
+  cached_dvl_angular_velocity_x_ = angular_velocity_x;
+  cached_dvl_angular_velocity_y_ = angular_velocity_y;
+  cached_dvl_angular_velocity_z_ = angular_velocity_z;
+  cached_dvl_distance_z_ = distance_z;
+  cached_dvl_confidence_ = confidence;
+  cached_dvl_gps_latitude_ = gps_latitude;
+  cached_dvl_gps_longitude_ = gps_longitude;
+  cached_dvl_gps_altitude_ = gps_altitude;
+  cached_dvl_gps_valid_ = gps_valid;
 }
 
 hardware_interface::return_type SensorsSystem::write(
@@ -684,6 +832,27 @@ void SensorsSystem::reset_sensor_state()
   dvl_gps_longitude_ = 0.0;
   dvl_gps_altitude_ = 0.0;
   dvl_gps_valid_ = 0.0;
+
+  std::lock_guard<std::mutex> lock(real_sensor_cache_mutex_);
+
+  cached_fluid_pressure_ = fluid_pressure_;
+
+  cached_battery_voltage_ = battery_voltage_;
+  cached_battery_current_ = battery_current_;
+  cached_battery_present_ = battery_present_;
+
+  cached_dvl_linear_velocity_x_ = dvl_linear_velocity_x_;
+  cached_dvl_linear_velocity_y_ = dvl_linear_velocity_y_;
+  cached_dvl_linear_velocity_z_ = dvl_linear_velocity_z_;
+  cached_dvl_angular_velocity_x_ = dvl_angular_velocity_x_;
+  cached_dvl_angular_velocity_y_ = dvl_angular_velocity_y_;
+  cached_dvl_angular_velocity_z_ = dvl_angular_velocity_z_;
+  cached_dvl_distance_z_ = dvl_distance_z_;
+  cached_dvl_confidence_ = dvl_confidence_;
+  cached_dvl_gps_latitude_ = dvl_gps_latitude_;
+  cached_dvl_gps_longitude_ = dvl_gps_longitude_;
+  cached_dvl_gps_altitude_ = dvl_gps_altitude_;
+  cached_dvl_gps_valid_ = dvl_gps_valid_;
 }
 
 }  // namespace sura_hardware_interface
