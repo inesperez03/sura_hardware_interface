@@ -359,7 +359,7 @@ bool GpsInterface::read_from_serial()
   uint8_t temp[512];
 
   while (true) {
-    const ssize_t bytes_read = read(fd_, temp, sizeof(temp));
+    const ssize_t bytes_read = ::read(fd_, temp, sizeof(temp));
 
     if (bytes_read > 0) {
       read_any = true;

@@ -54,7 +54,7 @@ private:
   bool active_{false};
 
   std::string protocol_{"ubx"};
-  std::string serial_port_("/dev/ttyAMA5");
+  std::string serial_port_{"/dev/ttyAMA5"};
   int baudrate_{230400};
 
   int fd_{-1};
