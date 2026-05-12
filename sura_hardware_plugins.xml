@@ -1,5 +1,14 @@
 <library path="sura_hardware_interface">
   <class
+    name="sura_hardware_interface/ActuatorsSystem"
+    type="sura_hardware_interface::ActuatorsSystem"
+    base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Hardware interface for auxiliary actuators
+    </description>
+  </class>
+
+  <class
     name="sura_hardware_interface/ThrustersSystem"
     type="sura_hardware_interface::ThrustersSystem"
     base_class_type="hardware_interface::SystemInterface">

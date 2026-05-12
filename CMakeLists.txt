@@ -51,6 +51,7 @@ if(TARGET_RASPBERRY)
 endif()
 
 add_library(${PROJECT_NAME} SHARED
+  src/actuators/actuators_system.cpp
   src/thrusters/thrusters_system.cpp
   src/thrusters/thruster_mapper.cpp
   src/sensors/sensors_system.cpp
