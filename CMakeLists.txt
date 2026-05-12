@@ -59,6 +59,7 @@ add_library(${PROJECT_NAME} SHARED
   src/sensors/pressure_interface.cpp
   src/sensors/battery_interface.cpp
   src/sensors/dvl75_interface.cpp
+  src/sensors/gps_interface.cpp
 )
 
 if(TARGET_RASPBERRY)

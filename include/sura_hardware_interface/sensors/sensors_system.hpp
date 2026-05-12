@@ -25,6 +25,7 @@
 #include "sura_hardware_interface/sensors/pressure_interface.hpp"
 #include "sura_hardware_interface/sensors/battery_interface.hpp"
 #include "sura_hardware_interface/sensors/dvl75_interface.hpp"
+#include "sura_hardware_interface/sensors/gps_interface.hpp"
 
 namespace sura_hardware_interface
 {
@@ -89,12 +90,14 @@ private:
   PressureInterface pressure_;
   BatteryInterface battery_;
   DvlInterface dvl_;
+  GpsInterface gps_;
 
   bool has_imu_{false};
   bool has_magnetometer_{false};
   bool has_pressure_{false};
   bool has_battery_{false};
   bool has_dvl_{false};
+  bool has_gps_{false};
   bool is_active_{false};
 
   std::string environment_{"real"};
@@ -123,6 +126,7 @@ private:
   std::string pressure_sensor_name_{"pressure_sensor"};
   std::string battery_sensor_name_{"battery_sensor"};
   std::string dvl_sensor_name_{"dvl_sensor"};
+  std::string gps_sensor_name_{"gps_sensor"};
 
   double orientation_x_{0.0};
   double orientation_y_{0.0};
@@ -162,6 +166,11 @@ private:
   double dvl_gps_longitude_{0.0};
   double dvl_gps_altitude_{0.0};
   double dvl_gps_valid_{0.0};
+
+  double gps_latitude_{0.0};
+  double gps_longitude_{0.0};
+  double gps_altitude_{0.0};
+  double gps_valid_{0.0};
 };
 
 }  // namespace sura_hardware_interface

@@ -114,6 +114,7 @@ hardware_interface::CallbackReturn SensorsSystem::on_init(
   has_pressure_ = has_sensor(pressure_sensor_name_);
   has_battery_ = has_sensor(battery_sensor_name_);
   has_dvl_ = has_sensor(dvl_sensor_name_);
+  has_gps_ = has_sensor(gps_sensor_name_);
 
   if (!has_imu_) {
     RCLCPP_ERROR(
@@ -153,6 +154,13 @@ hardware_interface::CallbackReturn SensorsSystem::on_init(
       dvl_sensor_name_.c_str());
   }
 
+  if (!has_gps_) {
+    RCLCPP_WARN(
+      kLogger,
+      "Optional sensor '%s' not found in ros2_control description",
+      gps_sensor_name_.c_str());
+  }
+
   RCLCPP_INFO(
     kLogger,
     "SensorsSystem initialized for environment='%s', robot_namespace='%s'",
@@ -183,6 +191,11 @@ hardware_interface::CallbackReturn SensorsSystem::on_configure(
       return hardware_interface::CallbackReturn::ERROR;
     }
 
+    if (has_gps_ && !gps_.initialize(info_)) {
+      RCLCPP_ERROR(kLogger, "Failed to initialize GPS interface");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+
     if (!battery_.initialize(info_)) {
       RCLCPP_ERROR(kLogger, "Failed to initialize battery interface");
       return hardware_interface::CallbackReturn::ERROR;
@@ -208,6 +221,11 @@ hardware_interface::CallbackReturn SensorsSystem::on_activate(
 
     if (has_dvl_ && !dvl_.activate()) {
       RCLCPP_ERROR(kLogger, "Failed to activate DVL");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+
+    if (has_gps_ && !gps_.activate()) {
+      RCLCPP_ERROR(kLogger, "Failed to activate GPS");
       return hardware_interface::CallbackReturn::ERROR;
     }
 
@@ -241,6 +259,11 @@ hardware_interface::CallbackReturn SensorsSystem::on_deactivate(
       return hardware_interface::CallbackReturn::ERROR;
     }
 
+    if (has_gps_ && !gps_.deactivate()) {
+      RCLCPP_ERROR(kLogger, "Failed to deactivate GPS");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+
     if (!battery_.deactivate()) {
       RCLCPP_ERROR(kLogger, "Failed to deactivate battery");
       return hardware_interface::CallbackReturn::ERROR;
@@ -260,7 +283,8 @@ std::vector<hardware_interface::StateInterface> SensorsSystem::export_state_inte
     (has_magnetometer_ ? 3U : 0U) +
     (has_pressure_ ? 1U : 0U) +
     (has_battery_ ? 3U : 0U) +
-    (has_dvl_ ? 12U : 0U));
+    (has_dvl_ ? 12U : 0U) +
+    (has_gps_ ? 4U : 0U));
 
   if (has_imu_) {
     interfaces.emplace_back(imu_sensor_name_, "orientation.x", &orientation_x_);
@@ -311,6 +335,13 @@ std::vector<hardware_interface::StateInterface> SensorsSystem::export_state_inte
     interfaces.emplace_back(dvl_sensor_name_, "gps.valid", &dvl_gps_valid_);
   }
 
+  if (has_gps_) {
+    interfaces.emplace_back(gps_sensor_name_, "gps.latitude", &gps_latitude_);
+    interfaces.emplace_back(gps_sensor_name_, "gps.longitude", &gps_longitude_);
+    interfaces.emplace_back(gps_sensor_name_, "gps.altitude", &gps_altitude_);
+    interfaces.emplace_back(gps_sensor_name_, "gps.valid", &gps_valid_);
+  }
+
   return interfaces;
 }
 
@@ -334,6 +365,11 @@ hardware_interface::CallbackReturn SensorsSystem::on_cleanup(
 
     if (has_dvl_ && !dvl_.cleanup()) {
       RCLCPP_ERROR(kLogger, "Failed to cleanup DVL");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+
+    if (has_gps_ && !gps_.cleanup()) {
+      RCLCPP_ERROR(kLogger, "Failed to cleanup GPS");
       return hardware_interface::CallbackReturn::ERROR;
     }
 
@@ -364,6 +400,10 @@ hardware_interface::CallbackReturn SensorsSystem::on_shutdown(
       (void)dvl_.deactivate();
       (void)dvl_.cleanup();
     }
+    if (has_gps_) {
+      (void)gps_.deactivate();
+      (void)gps_.cleanup();
+    }
     (void)battery_.deactivate();
     (void)battery_.cleanup();
   }
@@ -388,6 +428,10 @@ hardware_interface::CallbackReturn SensorsSystem::on_error(
     if (has_dvl_) {
       (void)dvl_.deactivate();
       (void)dvl_.cleanup();
+    }
+    if (has_gps_) {
+      (void)gps_.deactivate();
+      (void)gps_.cleanup();
     }
     (void)battery_.deactivate();
     (void)battery_.cleanup();
@@ -494,6 +538,24 @@ hardware_interface::return_type SensorsSystem::read(
       dvl_confidence_ = 0.0;
 
       dvl_gps_valid_ = 0.0;
+    }
+  }
+
+  if (has_gps_) {
+    const bool gps_ok = gps_.read(
+      gps_latitude_,
+      gps_longitude_,
+      gps_altitude_,
+      gps_valid_);
+
+    if (!gps_ok) {
+      RCLCPP_WARN_THROTTLE(
+        kLogger,
+        *rclcpp::Clock::make_shared(),
+        1000,
+        "Failed to read GPS data");
+
+      gps_valid_ = 0.0;
     }
   }
 
@@ -637,6 +699,11 @@ void SensorsSystem::sim_dvl_altitude_callback(
 
 void SensorsSystem::sim_gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg)
 {
+  gps_latitude_ = msg->latitude;
+  gps_longitude_ = msg->longitude;
+  gps_altitude_ = msg->altitude;
+  gps_valid_ = msg->status.status >= sensor_msgs::msg::NavSatStatus::STATUS_FIX ? 1.0 : 0.0;
+
   dvl_gps_latitude_ = msg->latitude;
   dvl_gps_longitude_ = msg->longitude;
   dvl_gps_altitude_ = msg->altitude;
@@ -683,6 +750,11 @@ void SensorsSystem::reset_sensor_state()
   dvl_gps_longitude_ = 0.0;
   dvl_gps_altitude_ = 0.0;
   dvl_gps_valid_ = 0.0;
+
+  gps_latitude_ = 0.0;
+  gps_longitude_ = 0.0;
+  gps_altitude_ = 0.0;
+  gps_valid_ = 0.0;
 }
 
 }  // namespace sura_hardware_interface
