@@ -1,13 +1,7 @@
 #include "sura_hardware_interface/actuators/actuators_system.hpp"
 
-#ifdef TARGET_RASPBERRY
-#include "bindings.h"
-#endif
-
-#include <cstdint>
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <stdexcept>
 
 #include "pluginlib/class_list_macros.hpp"
@@ -77,8 +71,6 @@ hardware_interface::CallbackReturn ActuatorsSystem::on_init(
 
   status_light_command_ = 1.0;
   status_light_state_ = 1.0;
-  navigator_initialized_ = false;
-  pwm_enabled_ = false;
   is_active_ = false;
 
   RCLCPP_INFO(
@@ -96,43 +88,17 @@ hardware_interface::CallbackReturn ActuatorsSystem::on_configure(
   is_active_ = false;
   status_light_command_ = 1.0;
   status_light_state_ = 1.0;
-  navigator_initialized_ = false;
-  pwm_enabled_ = false;
 
-  if (environment_ == "real") {
-#ifdef TARGET_RASPBERRY
-    set_raspberry_pi_version(Raspberry::Pi4);
-    set_navigator_version(NavigatorVersion::Version1);
-
-    try {
-      init();
-      navigator_initialized_ = true;
-
-      // Share the Navigator PWM block with the thruster stack. We keep the same
-      // 50 Hz frequency so channel 1 can be used like a binary relay output.
-      set_pwm_freq_hz(pwm_frequency_hz_);
-      set_pwm_enable(true);
-      pwm_enabled_ = true;
-      set_pwm_channel_duty_cycle(static_cast<uintptr_t>(status_light_channel_), 1.0F);
-    } catch (const std::exception & e) {
-      RCLCPP_ERROR(kLogger, "Failed to initialize status light channel: %s", e.what());
-      navigator_initialized_ = false;
-      pwm_enabled_ = false;
-      return hardware_interface::CallbackReturn::ERROR;
-    } catch (...) {
-      RCLCPP_ERROR(kLogger, "Failed to initialize status light channel: unknown error");
-      navigator_initialized_ = false;
-      pwm_enabled_ = false;
+  try {
+    if (!status_light_.initialize(info_, environment_.c_str(), status_light_channel_)) {
+      RCLCPP_ERROR(kLogger, "Failed to initialize status light interface");
       return hardware_interface::CallbackReturn::ERROR;
     }
-#else
-    RCLCPP_ERROR(
-      kLogger,
-      "Environment is 'real' but this build does not include Navigator support on this architecture");
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(kLogger, "Failed to initialize status light interface: %s", e.what());
     return hardware_interface::CallbackReturn::ERROR;
-#endif
-  } else if (environment_ != "sim") {
-    RCLCPP_ERROR(kLogger, "Unknown environment: %s", environment_.c_str());
+  } catch (...) {
+    RCLCPP_ERROR(kLogger, "Failed to initialize status light interface: unknown error");
     return hardware_interface::CallbackReturn::ERROR;
   }
 
@@ -146,8 +112,7 @@ hardware_interface::CallbackReturn ActuatorsSystem::on_cleanup(
   is_active_ = false;
   status_light_command_ = 1.0;
   status_light_state_ = 1.0;
-  navigator_initialized_ = false;
-  pwm_enabled_ = false;
+  status_light_.cleanup();
   RCLCPP_INFO(kLogger, "ActuatorsSystem cleaned up");
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -158,8 +123,7 @@ hardware_interface::CallbackReturn ActuatorsSystem::on_shutdown(
   is_active_ = false;
   status_light_command_ = 1.0;
   status_light_state_ = 1.0;
-  navigator_initialized_ = false;
-  pwm_enabled_ = false;
+  status_light_.cleanup();
   RCLCPP_INFO(kLogger, "ActuatorsSystem shutdown completed");
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -171,7 +135,15 @@ hardware_interface::CallbackReturn ActuatorsSystem::on_activate(
   status_light_command_ = 1.0;
   status_light_state_ = 1.0;
 
-  if (write_status_light(true) != hardware_interface::return_type::OK) {
+  try {
+    if (!status_light_.activate()) {
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(kLogger, "Failed to activate status light interface: %s", e.what());
+    return hardware_interface::CallbackReturn::ERROR;
+  } catch (...) {
+    RCLCPP_ERROR(kLogger, "Failed to activate status light interface: unknown error");
     return hardware_interface::CallbackReturn::ERROR;
   }
 
@@ -183,6 +155,7 @@ hardware_interface::CallbackReturn ActuatorsSystem::on_deactivate(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
   is_active_ = false;
+  status_light_.deactivate();
   RCLCPP_INFO(kLogger, "ActuatorsSystem deactivated");
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -191,8 +164,7 @@ hardware_interface::CallbackReturn ActuatorsSystem::on_error(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
   is_active_ = false;
-  navigator_initialized_ = false;
-  pwm_enabled_ = false;
+  status_light_.cleanup();
   RCLCPP_ERROR(kLogger, "ActuatorsSystem entered error state");
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -237,38 +209,20 @@ hardware_interface::return_type ActuatorsSystem::write(
 hardware_interface::return_type ActuatorsSystem::write_status_light(bool enabled)
 {
   status_light_state_ = enabled ? 1.0 : 0.0;
-
-  if (environment_ == "sim") {
-    return hardware_interface::return_type::OK;
-  }
-
-#ifndef TARGET_RASPBERRY
-  RCLCPP_ERROR(
-    kLogger,
-    "Real environment requested, but this build does not support Navigator hardware");
-  return hardware_interface::return_type::ERROR;
-#else
-  if (!navigator_initialized_ || !pwm_enabled_) {
-    RCLCPP_ERROR(kLogger, "Navigator PWM not initialized for status light");
-    return hardware_interface::return_type::ERROR;
-  }
-
   try {
-    // NavLight turns off when the signal is pulled to ground. We model the
-    // logical command as enabled=true, so channel HIGH means light ON.
-    set_pwm_channel_duty_cycle(
-      static_cast<uintptr_t>(status_light_channel_),
-      enabled ? 1.0F : 0.0F);
+    if (!status_light_.write(enabled)) {
+      RCLCPP_ERROR(kLogger, "Status light interface rejected write");
+      return hardware_interface::return_type::ERROR;
+    }
   } catch (const std::exception & e) {
-    RCLCPP_ERROR(kLogger, "Failed to write status light channel: %s", e.what());
+    RCLCPP_ERROR(kLogger, "Failed to write status light command: %s", e.what());
     return hardware_interface::return_type::ERROR;
   } catch (...) {
-    RCLCPP_ERROR(kLogger, "Failed to write status light channel: unknown error");
+    RCLCPP_ERROR(kLogger, "Failed to write status light command: unknown error");
     return hardware_interface::return_type::ERROR;
   }
 
   return hardware_interface::return_type::OK;
-#endif
 }
 
 }  // namespace sura_hardware_interface

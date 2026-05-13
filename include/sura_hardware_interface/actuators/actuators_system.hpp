@@ -10,6 +10,8 @@
 #include "rclcpp/macros.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 
+#include "sura_hardware_interface/actuators/light_interface.hpp"
+
 namespace sura_hardware_interface
 {
 
@@ -59,9 +61,7 @@ private:
   int status_light_channel_{1};
   double status_light_command_{1.0};
   double status_light_state_{1.0};
-  bool navigator_initialized_{false};
-  bool pwm_enabled_{false};
-  double pwm_frequency_hz_{50.0};
+  LightInterface status_light_;
 };
 
 }  // namespace sura_hardware_interface
