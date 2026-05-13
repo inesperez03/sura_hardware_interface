@@ -76,6 +76,7 @@ add_library(${PROJECT_NAME} SHARED
   src/sensors/pressure_interface.cpp
   src/sensors/battery_interface.cpp
   src/sensors/dvl75_interface.cpp
+  src/sensors/leak_interface.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE

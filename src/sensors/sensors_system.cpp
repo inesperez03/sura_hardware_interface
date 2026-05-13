@@ -32,6 +32,16 @@ std::string trim_namespace(std::string value)
 
   return value;
 }
+
+std::chrono::steady_clock::duration period_from_rate(double rate_hz)
+{
+  if (!std::isfinite(rate_hz) || rate_hz <= 0.0) {
+    return std::chrono::steady_clock::duration::max();
+  }
+
+  return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+    std::chrono::duration<double>(1.0 / rate_hz));
+}
 }  // namespace
 
 std::string SensorsSystem::parameter_or(
@@ -67,19 +77,6 @@ double SensorsSystem::parameter_or(const std::string & name, double default_valu
   }
 }
 
-namespace
-{
-std::chrono::steady_clock::duration period_from_rate(double rate_hz)
-{
-  if (!std::isfinite(rate_hz) || rate_hz <= 0.0) {
-    return std::chrono::steady_clock::duration::max();
-  }
-
-  return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-    std::chrono::duration<double>(1.0 / rate_hz));
-}
-}  // namespace
-
 hardware_interface::CallbackReturn SensorsSystem::on_init(
   const hardware_interface::HardwareInfo & info)
 {
@@ -111,11 +108,14 @@ hardware_interface::CallbackReturn SensorsSystem::on_init(
   sim_dvl_altitude_topic_ =
     parameter_or("sim_dvl_altitude_topic", topic_root + "/stonefish/sensors/dvl/altitude");
   sim_gps_topic_ = parameter_or("sim_gps_topic", topic_root + "/stonefish/sensors/gps");
+
   pressure_offset_pa_ = parameter_or("pressure_offset_pa", 101325.0);
   sim_dvl_confidence_ = parameter_or("sim_dvl_confidence", 100.0);
+
   pressure_read_rate_hz_ = parameter_or("pressure_read_rate_hz", 100.0);
   dvl_read_rate_hz_ = parameter_or("dvl_read_rate_hz", 50.0);
   battery_read_rate_hz_ = parameter_or("battery_read_rate_hz", 1.0);
+  leak_read_rate_hz_ = parameter_or("leak_read_rate_hz", 1.0);
 
   const auto has_sensor = [this](const std::string & sensor_name) {
     return std::any_of(
@@ -130,6 +130,7 @@ hardware_interface::CallbackReturn SensorsSystem::on_init(
   has_magnetometer_ = has_sensor(magnetometer_sensor_name_);
   has_pressure_ = has_sensor(pressure_sensor_name_);
   has_battery_ = has_sensor(battery_sensor_name_);
+  has_leak_ = has_sensor(leak_sensor_name_);
   has_dvl_ = has_sensor(dvl_sensor_name_);
 
   if (!has_imu_) {
@@ -162,6 +163,13 @@ hardware_interface::CallbackReturn SensorsSystem::on_init(
       "Sensor '%s' not found in ros2_control description",
       battery_sensor_name_.c_str());
     return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  if (!has_leak_) {
+    RCLCPP_WARN(
+      kLogger,
+      "Optional sensor '%s' not found in ros2_control description",
+      leak_sensor_name_.c_str());
   }
 
   if (!has_dvl_) {
@@ -206,6 +214,11 @@ hardware_interface::CallbackReturn SensorsSystem::on_configure(
       RCLCPP_ERROR(kLogger, "Failed to initialize battery interface");
       return hardware_interface::CallbackReturn::ERROR;
     }
+
+    if (has_leak_ && !leak_interface_.initialize(info_)) {
+      RCLCPP_ERROR(kLogger, "Failed to initialize leak interface");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
   }
 
   is_active_ = false;
@@ -235,9 +248,20 @@ hardware_interface::CallbackReturn SensorsSystem::on_activate(
       return hardware_interface::CallbackReturn::ERROR;
     }
 
+    if (has_leak_ && !leak_interface_.activate()) {
+      RCLCPP_ERROR(kLogger, "Failed to activate leak sensor");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+
     poll_pressure_once();
     poll_battery_once();
+
+    if (has_leak_) {
+      poll_leak_once();
+    }
+
     poll_dvl_once();
+
     start_real_sensor_threads();
   }
 
@@ -271,6 +295,11 @@ hardware_interface::CallbackReturn SensorsSystem::on_deactivate(
       RCLCPP_ERROR(kLogger, "Failed to deactivate battery");
       return hardware_interface::CallbackReturn::ERROR;
     }
+
+    if (has_leak_ && !leak_interface_.deactivate()) {
+      RCLCPP_ERROR(kLogger, "Failed to deactivate leak sensor");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
   }
 
   RCLCPP_INFO(kLogger, "SensorsSystem deactivated");
@@ -286,6 +315,7 @@ std::vector<hardware_interface::StateInterface> SensorsSystem::export_state_inte
     (has_magnetometer_ ? 3U : 0U) +
     (has_pressure_ ? 1U : 0U) +
     (has_battery_ ? 3U : 0U) +
+    (has_leak_ ? 1U : 0U) +
     (has_dvl_ ? 12U : 0U));
 
   if (has_imu_) {
@@ -317,6 +347,10 @@ std::vector<hardware_interface::StateInterface> SensorsSystem::export_state_inte
     interfaces.emplace_back(battery_sensor_name_, "voltage", &battery_voltage_);
     interfaces.emplace_back(battery_sensor_name_, "current", &battery_current_);
     interfaces.emplace_back(battery_sensor_name_, "present", &battery_present_);
+  }
+
+  if (has_leak_) {
+    interfaces.emplace_back(leak_sensor_name_, "leak", &leak_);
   }
 
   if (has_dvl_) {
@@ -369,6 +403,11 @@ hardware_interface::CallbackReturn SensorsSystem::on_cleanup(
       RCLCPP_ERROR(kLogger, "Failed to cleanup battery");
       return hardware_interface::CallbackReturn::ERROR;
     }
+
+    if (has_leak_ && !leak_interface_.cleanup()) {
+      RCLCPP_ERROR(kLogger, "Failed to cleanup leak sensor");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
   }
 
   reset_sim_subscribers();
@@ -394,6 +433,11 @@ hardware_interface::CallbackReturn SensorsSystem::on_shutdown(
     (void)dvl_.cleanup();
     (void)battery_.deactivate();
     (void)battery_.cleanup();
+
+    if (has_leak_) {
+      (void)leak_interface_.deactivate();
+      (void)leak_interface_.cleanup();
+    }
   }
 
   reset_sim_subscribers();
@@ -419,6 +463,11 @@ hardware_interface::CallbackReturn SensorsSystem::on_error(
     (void)dvl_.cleanup();
     (void)battery_.deactivate();
     (void)battery_.cleanup();
+
+    if (has_leak_) {
+      (void)leak_interface_.deactivate();
+      (void)leak_interface_.cleanup();
+    }
   }
 
   reset_sim_subscribers();
@@ -469,6 +518,8 @@ hardware_interface::return_type SensorsSystem::read(
     battery_current_ = cached_battery_current_;
     battery_present_ = cached_battery_present_;
 
+    leak_ = cached_leak_;
+
     dvl_linear_velocity_x_ = cached_dvl_linear_velocity_x_;
     dvl_linear_velocity_y_ = cached_dvl_linear_velocity_y_;
     dvl_linear_velocity_z_ = cached_dvl_linear_velocity_z_;
@@ -494,6 +545,11 @@ void SensorsSystem::start_real_sensor_threads()
 
   pressure_thread_ = std::thread(&SensorsSystem::pressure_poll_loop, this);
   battery_thread_ = std::thread(&SensorsSystem::battery_poll_loop, this);
+
+  if (has_leak_) {
+    leak_thread_ = std::thread(&SensorsSystem::leak_poll_loop, this);
+  }
+
   dvl_thread_ = std::thread(&SensorsSystem::dvl_poll_loop, this);
 }
 
@@ -507,6 +563,10 @@ void SensorsSystem::stop_real_sensor_threads()
 
   if (battery_thread_.joinable()) {
     battery_thread_.join();
+  }
+
+  if (leak_thread_.joinable()) {
+    leak_thread_.join();
   }
 
   if (dvl_thread_.joinable()) {
@@ -538,6 +598,23 @@ void SensorsSystem::battery_poll_loop()
 
   while (real_sensor_threads_running_.load()) {
     poll_battery_once();
+
+    if (period == std::chrono::steady_clock::duration::max()) {
+      break;
+    }
+
+    next += period;
+    std::this_thread::sleep_until(next);
+  }
+}
+
+void SensorsSystem::leak_poll_loop()
+{
+  const auto period = period_from_rate(leak_read_rate_hz_);
+  auto next = std::chrono::steady_clock::now();
+
+  while (real_sensor_threads_running_.load()) {
+    poll_leak_once();
 
     if (period == std::chrono::steady_clock::duration::max()) {
       break;
@@ -593,6 +670,22 @@ void SensorsSystem::poll_battery_once()
   cached_battery_voltage_ = voltage;
   cached_battery_current_ = current;
   cached_battery_present_ = present;
+}
+
+void SensorsSystem::poll_leak_once()
+{
+  if (!has_leak_) {
+    return;
+  }
+
+  double leak = 0.0;
+
+  if (!leak_interface_.read(leak)) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(real_sensor_cache_mutex_);
+  cached_leak_ = leak;
 }
 
 void SensorsSystem::poll_dvl_once()
@@ -817,6 +910,8 @@ void SensorsSystem::reset_sensor_state()
   battery_current_ = std::numeric_limits<double>::quiet_NaN();
   battery_present_ = 0.0;
 
+  leak_ = 0.0;
+
   dvl_linear_velocity_x_ = 0.0;
   dvl_linear_velocity_y_ = 0.0;
   dvl_linear_velocity_z_ = 0.0;
@@ -840,6 +935,8 @@ void SensorsSystem::reset_sensor_state()
   cached_battery_voltage_ = battery_voltage_;
   cached_battery_current_ = battery_current_;
   cached_battery_present_ = battery_present_;
+
+  cached_leak_ = leak_;
 
   cached_dvl_linear_velocity_x_ = dvl_linear_velocity_x_;
   cached_dvl_linear_velocity_y_ = dvl_linear_velocity_y_;

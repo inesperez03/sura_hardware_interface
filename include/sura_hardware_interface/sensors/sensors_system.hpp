@@ -29,6 +29,7 @@
 #include "sura_hardware_interface/sensors/magnetometer_interface.hpp"
 #include "sura_hardware_interface/sensors/pressure_interface.hpp"
 #include "sura_hardware_interface/sensors/battery_interface.hpp"
+#include "sura_hardware_interface/sensors/leak_interface.hpp"
 #include "sura_hardware_interface/sensors/dvl75_interface.hpp"
 
 namespace sura_hardware_interface
@@ -77,12 +78,17 @@ private:
   void reset_sim_subscribers();
   void start_real_sensor_threads();
   void stop_real_sensor_threads();
+
   void pressure_poll_loop();
   void battery_poll_loop();
+  void leak_poll_loop();
   void dvl_poll_loop();
+
   void poll_pressure_once();
   void poll_battery_once();
+  void poll_leak_once();
   void poll_dvl_once();
+
   std::string parameter_or(const std::string & name, const std::string & default_value) const;
   double parameter_or(const std::string & name, double default_value) const;
 
@@ -103,33 +109,42 @@ private:
   MagnetometerInterface magnetometer_;
   PressureInterface pressure_;
   BatteryInterface battery_;
+  LeakInterface leak_interface_;
   DvlInterface dvl_;
 
   bool has_imu_{false};
   bool has_magnetometer_{false};
   bool has_pressure_{false};
   bool has_battery_{false};
+  bool has_leak_{false};
   bool has_dvl_{false};
   bool is_active_{false};
 
   std::string environment_{"real"};
   std::string robot_namespace_{"cirtesub"};
+
   std::string sim_imu_topic_;
   std::string sim_magnetometer_topic_;
   std::string sim_pressure_topic_;
   std::string sim_dvl_topic_;
   std::string sim_dvl_altitude_topic_;
   std::string sim_gps_topic_;
+
   double pressure_offset_pa_{101325.0};
   double sim_dvl_confidence_{100.0};
-  double pressure_read_rate_hz_{100.0};
+
+  double pressure_read_rate_hz_{200.0};
   double dvl_read_rate_hz_{50.0};
   double battery_read_rate_hz_{1.0};
+  double leak_read_rate_hz_{1.0};
 
   std::atomic_bool real_sensor_threads_running_{false};
+
   std::thread pressure_thread_;
   std::thread battery_thread_;
+  std::thread leak_thread_;
   std::thread dvl_thread_;
+
   std::mutex real_sensor_cache_mutex_;
 
   double cached_fluid_pressure_{0.0};
@@ -137,6 +152,8 @@ private:
   double cached_battery_voltage_{0.0};
   double cached_battery_current_{0.0};
   double cached_battery_present_{0.0};
+
+  double cached_leak_{0.0};
 
   double cached_dvl_distance_z_{0.0};
   double cached_dvl_confidence_{0.0};
@@ -167,6 +184,7 @@ private:
   std::string magnetometer_sensor_name_{"magnetometer_sensor"};
   std::string pressure_sensor_name_{"pressure_sensor"};
   std::string battery_sensor_name_{"battery_sensor"};
+  std::string leak_sensor_name_{"leak_sensor"};
   std::string dvl_sensor_name_{"dvl_sensor"};
 
   double orientation_x_{0.0};
@@ -191,6 +209,8 @@ private:
   double battery_voltage_{0.0};
   double battery_current_{0.0};
   double battery_present_{0.0};
+
+  double leak_{0.0};
 
   double dvl_distance_z_{0.0};
   double dvl_confidence_{0.0};
