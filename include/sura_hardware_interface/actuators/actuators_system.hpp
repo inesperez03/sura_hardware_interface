@@ -11,6 +11,7 @@
 #include "rclcpp_lifecycle/state.hpp"
 
 #include "sura_hardware_interface/actuators/light_interface.hpp"
+#include "sura_hardware_interface/actuators/lights_bluerov_interface.hpp"
 
 namespace sura_hardware_interface
 {
@@ -54,14 +55,25 @@ public:
 
 private:
   hardware_interface::return_type write_status_light(bool enabled);
+  hardware_interface::return_type write_bluerov_lights(double pwm_us);
 
   std::string environment_{"real"};
   bool is_active_{false};
+
+  bool has_status_light_{false};
+  bool has_bluerov_lights_{false};
+  std::string status_light_joint_name_;
+  std::string bluerov_lights_joint_name_;
 
   int status_light_channel_{1};
   double status_light_command_{1.0};
   double status_light_state_{1.0};
   LightInterface status_light_;
+
+  int bluerov_lights_channel_{11};
+  double bluerov_lights_command_{1100.0};
+  double bluerov_lights_state_{1100.0};
+  LightsBluerovInterface bluerov_lights_;
 };
 
 }  // namespace sura_hardware_interface

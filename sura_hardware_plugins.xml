@@ -16,4 +16,13 @@
       Hardware interface for sensors
     </description>
   </class>
+
+  <class
+    name="sura_hardware_interface/ActuatorsSystem"
+    type="sura_hardware_interface::ActuatorsSystem"
+    base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Hardware interface for actuators
+    </description>
+  </class>
 </library>
