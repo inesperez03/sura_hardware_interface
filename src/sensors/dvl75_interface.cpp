@@ -2,10 +2,12 @@
 
 #include <array>
 #include <cerrno>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <exception>
 #include <iostream>
+#include <stdexcept>
 #include <sstream>
 #include <vector>
 
@@ -375,8 +377,8 @@ bool DvlInterface::receiveAndParseOnce()
     if (line.rfind("GPS:", 0) == 0) {
       const std::string nmea_line = line.substr(4);
 
-      double latitude = 0.0;
-      double longitude = 0.0;
+      double latitude = last_gps_latitude_;
+      double longitude = last_gps_longitude_;
       double altitude = 0.0;
       double valid = 0.0;
 
@@ -497,6 +499,11 @@ bool DvlInterface::parseGprmc(
   double & altitude,
   double & valid)
 {
+  if (!hasValidNmeaChecksum(line)) {
+    valid = 0.0;
+    return false;
+  }
+
   const std::string clean = removeChecksum(line);
 
   std::vector<std::string> parts;
@@ -532,9 +539,17 @@ bool DvlInterface::parseGprmc(
     return true;
   }
 
+  if (
+    (parts[4] != "N" && parts[4] != "S") ||
+    (parts[6] != "E" && parts[6] != "W"))
+  {
+    valid = 0.0;
+    return true;
+  }
+
   try {
-    latitude = nmeaCoordinateToDecimalDegrees(parts[3], parts[4]);
-    longitude = nmeaCoordinateToDecimalDegrees(parts[5], parts[6]);
+    latitude = nmeaCoordinateToDecimalDegrees(parts[3], parts[4], 90.0);
+    longitude = nmeaCoordinateToDecimalDegrees(parts[5], parts[6], 180.0);
 
     // RMC no trae altitud. Si luego quieres altitud real, parsea GGA.
     altitude = 0.0;
@@ -556,20 +571,83 @@ bool DvlInterface::parseGprmc(
 
 double DvlInterface::nmeaCoordinateToDecimalDegrees(
   const std::string & value,
-  const std::string & hemisphere)
+  const std::string & hemisphere,
+  const double max_degrees)
 {
+  if (
+    hemisphere != "N" && hemisphere != "S" &&
+    hemisphere != "E" && hemisphere != "W")
+  {
+    throw std::invalid_argument("invalid NMEA hemisphere");
+  }
+
   const double raw = std::stod(value);
 
   const double degrees = std::floor(raw / 100.0);
   const double minutes = raw - degrees * 100.0;
 
+  if (
+    !std::isfinite(raw) ||
+    degrees < 0.0 ||
+    degrees > max_degrees ||
+    minutes < 0.0 ||
+    minutes >= 60.0)
+  {
+    throw std::out_of_range("invalid NMEA coordinate");
+  }
+
   double decimal = degrees + minutes / 60.0;
+
+  if (decimal > max_degrees) {
+    throw std::out_of_range("NMEA coordinate exceeds range");
+  }
 
   if (hemisphere == "S" || hemisphere == "W") {
     decimal = -decimal;
   }
 
   return decimal;
+}
+
+bool DvlInterface::hasValidNmeaChecksum(const std::string & line)
+{
+  const auto start = line.find('$');
+  const auto checksum_pos = line.find('*');
+
+  if (start == std::string::npos || checksum_pos == std::string::npos) {
+    return true;
+  }
+
+  if (checksum_pos <= start + 1 || checksum_pos + 2 >= line.size()) {
+    return false;
+  }
+
+  const char high = line[checksum_pos + 1];
+  const char low = line[checksum_pos + 2];
+
+  if (
+    !std::isxdigit(static_cast<unsigned char>(high)) ||
+    !std::isxdigit(static_cast<unsigned char>(low)))
+  {
+    return false;
+  }
+
+  unsigned int calculated = 0;
+  for (auto index = start + 1; index < checksum_pos; ++index) {
+    calculated ^= static_cast<unsigned char>(line[index]);
+  }
+
+  const auto hex_value = [](const char c) -> unsigned int {
+      if (c >= '0' && c <= '9') {
+        return static_cast<unsigned int>(c - '0');
+      }
+
+      const char upper = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+      return static_cast<unsigned int>(upper - 'A' + 10);
+    };
+
+  const unsigned int expected = (hex_value(high) << 4) | hex_value(low);
+  return calculated == expected;
 }
 
 std::string DvlInterface::removeChecksum(const std::string & line)

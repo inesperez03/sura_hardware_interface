@@ -90,8 +90,10 @@ private:
 
   static double nmeaCoordinateToDecimalDegrees(
     const std::string & value,
-    const std::string & hemisphere);
+    const std::string & hemisphere,
+    double max_degrees);
 
+  static bool hasValidNmeaChecksum(const std::string & line);
   static std::string removeChecksum(const std::string & line);
 };
 
