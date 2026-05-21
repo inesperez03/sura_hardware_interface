@@ -1,36 +1,23 @@
 #pragma once
 
-#include <memory>
 #include <atomic>
-#include <chrono>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
-#include <hardware_interface/hardware_info.hpp>
-#include <hardware_interface/system_interface.hpp>
-#include <hardware_interface/types/hardware_interface_return_values.hpp>
-#include <rclcpp/rclcpp.hpp>
-#include <rclcpp/macros.hpp>
-#include <rclcpp_lifecycle/state.hpp>
-#include <sensor_msgs/msg/fluid_pressure.hpp>
-#include <sensor_msgs/msg/imu.hpp>
-#include <sensor_msgs/msg/magnetic_field.hpp>
-#include <sensor_msgs/msg/nav_sat_fix.hpp>
-#include <sensor_msgs/msg/nav_sat_status.hpp>
-#include <sensor_msgs/msg/range.hpp>
+#include "hardware_interface/handle.hpp"
+#include "hardware_interface/hardware_info.hpp"
+#include "hardware_interface/system_interface.hpp"
+#include "hardware_interface/types/hardware_interface_return_values.hpp"
 
-#if SURA_HAS_STONEFISH
-#include <stonefish_ros2/msg/dvl.hpp>
-#endif
+#include "pluginlib/class_loader.hpp"
+#include "rclcpp/rclcpp.hpp"
+#include "rclcpp_lifecycle/state.hpp"
 
-#include "sura_hardware_interface/sensors/imu_interface.hpp"
-#include "sura_hardware_interface/sensors/magnetometer_interface.hpp"
-#include "sura_hardware_interface/sensors/pressure_interface.hpp"
-#include "sura_hardware_interface/sensors/battery_interface.hpp"
-#include "sura_hardware_interface/sensors/leak_interface.hpp"
-#include "sura_hardware_interface/sensors/dvl75_interface.hpp"
+#include "sura_hardware_interface/sensors/sensor_interface_base.hpp"
 
 namespace sura_hardware_interface
 {
@@ -40,8 +27,16 @@ class SensorsSystem : public hardware_interface::SystemInterface
 public:
   RCLCPP_SHARED_PTR_DEFINITIONS(SensorsSystem)
 
+  SensorsSystem();
+
   hardware_interface::CallbackReturn on_init(
     const hardware_interface::HardwareInfo & info) override;
+
+  std::vector<hardware_interface::StateInterface>
+  export_state_interfaces() override;
+
+  std::vector<hardware_interface::CommandInterface>
+  export_command_interfaces() override;
 
   hardware_interface::CallbackReturn on_configure(
     const rclcpp_lifecycle::State & previous_state) override;
@@ -61,9 +56,6 @@ public:
   hardware_interface::CallbackReturn on_error(
     const rclcpp_lifecycle::State & previous_state) override;
 
-  std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
-  std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
-
   hardware_interface::return_type read(
     const rclcpp::Time & time,
     const rclcpp::Duration & period) override;
@@ -73,160 +65,62 @@ public:
     const rclcpp::Duration & period) override;
 
 private:
-  void reset_sensor_state();
-  void configure_sim_subscribers();
-  void reset_sim_subscribers();
-  void start_real_sensor_threads();
-  void stop_real_sensor_threads();
+  struct SensorInstance
+  {
+    hardware_interface::ComponentInfo info;
+    pluginlib::UniquePtr<SensorInterfaceBase> interface;
 
-  void pressure_poll_loop();
-  void battery_poll_loop();
-  void leak_poll_loop();
-  void dvl_poll_loop();
+    std::unordered_map<std::string, double> control_states;
+    std::unordered_map<std::string, double> read_states;
 
-  void poll_pressure_once();
-  void poll_battery_once();
-  void poll_leak_once();
-  void poll_dvl_once();
+    std::mutex states_mutex;
 
-  std::string parameter_or(const std::string & name, const std::string & default_value) const;
-  double parameter_or(const std::string & name, double default_value) const;
+    double read_rate_hz{0.0};
+    bool use_thread{false};
 
-  void sim_imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg);
-  void sim_magnetometer_callback(const sensor_msgs::msg::MagneticField::SharedPtr msg);
-  void sim_pressure_callback(const sensor_msgs::msg::FluidPressure::SharedPtr msg);
+    std::atomic_bool read_thread_running{false};
+    std::thread read_thread;
 
-#if SURA_HAS_STONEFISH
-  void sim_dvl_callback(const stonefish_ros2::msg::DVL::SharedPtr msg);
-#endif
+    std::atomic_bool last_read_ok{true};
+  };
 
-  void sim_dvl_altitude_callback(const sensor_msgs::msg::Range::SharedPtr msg);
-  void sim_gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg);
+  void start_sensor_threads();
+  void stop_sensor_threads();
 
-  hardware_interface::HardwareInfo info_;
+  void start_sim_spin_thread();
+  void stop_sim_spin_thread();
 
-  ImuInterface imu_;
-  MagnetometerInterface magnetometer_;
-  PressureInterface pressure_;
-  BatteryInterface battery_;
-  LeakInterface leak_interface_;
-  DvlInterface dvl_;
+  void sensor_read_loop(SensorInstance * sensor);
 
-  bool has_imu_{false};
-  bool has_magnetometer_{false};
-  bool has_pressure_{false};
-  bool has_battery_{false};
-  bool has_leak_{false};
-  bool has_dvl_{false};
-  bool is_active_{false};
+  void reset_states();
+
+  static std::string parameter_or(
+    const std::unordered_map<std::string, std::string> & parameters,
+    const std::string & name,
+    const std::string & default_value);
+
+  static bool has_parameter(
+    const hardware_interface::ComponentInfo & component,
+    const std::string & name);
+
+  static double component_double_parameter_or(
+    const hardware_interface::ComponentInfo & component,
+    const std::string & name,
+    double default_value);
 
   std::string environment_{"real"};
-  std::string robot_namespace_{"cirtesub"};
 
-  std::string sim_imu_topic_;
-  std::string sim_magnetometer_topic_;
-  std::string sim_pressure_topic_;
-  std::string sim_dvl_topic_;
-  std::string sim_dvl_altitude_topic_;
-  std::string sim_gps_topic_;
+  bool is_configured_{false};
+  bool is_active_{false};
 
-  double pressure_offset_pa_{101325.0};
-  double sim_dvl_confidence_{100.0};
+  std::vector<std::unique_ptr<SensorInstance>> sensors_;
 
-  double pressure_read_rate_hz_{200.0};
-  double dvl_read_rate_hz_{50.0};
-  double battery_read_rate_hz_{1.0};
-  double leak_read_rate_hz_{1.0};
-
-  std::atomic_bool real_sensor_threads_running_{false};
-
-  std::thread pressure_thread_;
-  std::thread battery_thread_;
-  std::thread leak_thread_;
-  std::thread dvl_thread_;
-
-  std::mutex real_sensor_cache_mutex_;
-
-  double cached_fluid_pressure_{0.0};
-
-  double cached_battery_voltage_{0.0};
-  double cached_battery_current_{0.0};
-  double cached_battery_present_{0.0};
-
-  double cached_leak_{0.0};
-
-  double cached_dvl_distance_z_{0.0};
-  double cached_dvl_confidence_{0.0};
-  double cached_dvl_linear_velocity_x_{0.0};
-  double cached_dvl_linear_velocity_y_{0.0};
-  double cached_dvl_linear_velocity_z_{0.0};
-  double cached_dvl_angular_velocity_x_{0.0};
-  double cached_dvl_angular_velocity_y_{0.0};
-  double cached_dvl_angular_velocity_z_{0.0};
-  double cached_dvl_gps_latitude_{0.0};
-  double cached_dvl_gps_longitude_{0.0};
-  double cached_dvl_gps_altitude_{0.0};
-  double cached_dvl_gps_valid_{0.0};
+  pluginlib::ClassLoader<SensorInterfaceBase> sensor_interface_loader_;
 
   rclcpp::Node::SharedPtr sim_node_;
-  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sim_imu_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::MagneticField>::SharedPtr sim_magnetometer_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::FluidPressure>::SharedPtr sim_pressure_sub_;
 
-#if SURA_HAS_STONEFISH
-  rclcpp::Subscription<stonefish_ros2::msg::DVL>::SharedPtr sim_dvl_sub_;
-#endif
-
-  rclcpp::Subscription<sensor_msgs::msg::Range>::SharedPtr sim_dvl_altitude_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr sim_gps_sub_;
-
-  std::string imu_sensor_name_{"imu_sensor"};
-  std::string magnetometer_sensor_name_{"magnetometer_sensor"};
-  std::string pressure_sensor_name_{"pressure_sensor"};
-  std::string battery_sensor_name_{"battery_sensor"};
-  std::string leak_sensor_name_{"leak_sensor"};
-  std::string dvl_sensor_name_{"dvl_sensor"};
-
-  double orientation_x_{0.0};
-  double orientation_y_{0.0};
-  double orientation_z_{0.0};
-  double orientation_w_{1.0};
-
-  double angular_velocity_x_{0.0};
-  double angular_velocity_y_{0.0};
-  double angular_velocity_z_{0.0};
-
-  double linear_acceleration_x_{0.0};
-  double linear_acceleration_y_{0.0};
-  double linear_acceleration_z_{0.0};
-
-  double magnetic_field_x_{0.0};
-  double magnetic_field_y_{0.0};
-  double magnetic_field_z_{0.0};
-
-  double fluid_pressure_{0.0};
-
-  double battery_voltage_{0.0};
-  double battery_current_{0.0};
-  double battery_present_{0.0};
-
-  double leak_{0.0};
-
-  double dvl_distance_z_{0.0};
-  double dvl_confidence_{0.0};
-
-  double dvl_linear_velocity_x_{0.0};
-  double dvl_linear_velocity_y_{0.0};
-  double dvl_linear_velocity_z_{0.0};
-
-  double dvl_angular_velocity_x_{0.0};
-  double dvl_angular_velocity_y_{0.0};
-  double dvl_angular_velocity_z_{0.0};
-
-  double dvl_gps_latitude_{0.0};
-  double dvl_gps_longitude_{0.0};
-  double dvl_gps_altitude_{0.0};
-  double dvl_gps_valid_{0.0};
+  std::atomic_bool sim_spin_running_{false};
+  std::thread sim_spin_thread_;
 };
 
 }  // namespace sura_hardware_interface

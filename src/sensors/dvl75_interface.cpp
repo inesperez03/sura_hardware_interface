@@ -3,12 +3,15 @@
 #include <array>
 #include <cerrno>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <exception>
 #include <iostream>
-#include <stdexcept>
 #include <sstream>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -16,37 +19,229 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "geometry_msgs/msg/twist_stamped.hpp"
+#include "pluginlib/class_list_macros.hpp"
+#include "sensor_msgs/msg/nav_sat_fix.hpp"
+#include "std_msgs/msg/float64.hpp"
+
 namespace sura_hardware_interface
 {
 
-bool DvlInterface::initialize(const hardware_interface::HardwareInfo & info)
+namespace
+{
+
+std::string get_param_or(
+  const hardware_interface::ComponentInfo & sensor_info,
+  const std::string & name,
+  const std::string & default_value)
+{
+  const auto it = sensor_info.parameters.find(name);
+
+  if (it == sensor_info.parameters.end()) {
+    return default_value;
+  }
+
+  return it->second;
+}
+
+int get_int_param_or(
+  const hardware_interface::ComponentInfo & sensor_info,
+  const std::string & name,
+  const int default_value)
+{
+  const auto it = sensor_info.parameters.find(name);
+
+  if (it == sensor_info.parameters.end()) {
+    return default_value;
+  }
+
+  return std::stoi(it->second);
+}
+
+double get_double_param_or(
+  const hardware_interface::ComponentInfo & sensor_info,
+  const std::string & name,
+  const double default_value)
+{
+  const auto it = sensor_info.parameters.find(name);
+
+  if (it == sensor_info.parameters.end()) {
+    return default_value;
+  }
+
+  return std::stod(it->second);
+}
+
+void set_state_if_exists(
+  std::unordered_map<std::string, double> & states,
+  const std::string & name,
+  const double value)
+{
+  const auto it = states.find(name);
+
+  if (it != states.end()) {
+    it->second = value;
+  }
+}
+
+}  // namespace
+
+bool DvlInterface::initialize(
+  const hardware_interface::ComponentInfo & sensor_info,
+  const hardware_interface::HardwareInfo &,
+  const std::string & environment,
+  const rclcpp::Node::SharedPtr & sim_node)
 {
   if (initialized_) {
     return true;
   }
 
-  if (info.hardware_parameters.count("dvl_ip") > 0) {
-    dvl_ip_ = info.hardware_parameters.at("dvl_ip");
-  }
+  sensor_name_ = sensor_info.name;
+  environment_ = environment;
+  sim_node_ = sim_node;
 
-  if (info.hardware_parameters.count("dvl_listen_port") > 0) {
-    listen_port_ = std::stoi(info.hardware_parameters.at("dvl_listen_port"));
-  }
-
-  if (info.hardware_parameters.count("dvl_command_port") > 0) {
-    command_port_ = std::stoi(info.hardware_parameters.at("dvl_command_port"));
-  }
-
-  if (info.hardware_parameters.count("dvl_min_confidence") > 0) {
-    min_confidence_ = std::stod(info.hardware_parameters.at("dvl_min_confidence"));
-  }
-
-  if (info.hardware_parameters.count("dvl_timeout_s") > 0) {
-    timeout_s_ = std::stod(info.hardware_parameters.at("dvl_timeout_s"));
-  }
-
-  if (!setupSocket()) {
+  if (environment_ != "real" && environment_ != "sim") {
+    std::cerr << "[DVL] Unsupported environment: " << environment_ << std::endl;
     return false;
+  }
+
+  try {
+    read_rate_hz_ = get_double_param_or(
+      sensor_info,
+      "read_rate_hz",
+      read_rate_hz_);
+
+    sim_dvl_confidence_ = get_double_param_or(
+      sensor_info,
+      "sim_dvl_confidence",
+      sim_dvl_confidence_);
+
+    dvl_ip_ = get_param_or(
+      sensor_info,
+      "dvl_ip",
+      dvl_ip_);
+
+    listen_port_ = get_int_param_or(
+      sensor_info,
+      "dvl_listen_port",
+      listen_port_);
+
+    command_port_ = get_int_param_or(
+      sensor_info,
+      "dvl_command_port",
+      command_port_);
+
+    min_confidence_ = get_double_param_or(
+      sensor_info,
+      "dvl_min_confidence",
+      min_confidence_);
+
+    timeout_s_ = get_double_param_or(
+      sensor_info,
+      "dvl_timeout_s",
+      timeout_s_);
+
+    stonefish_topic_ = get_param_or(
+      sensor_info,
+      "stonefish_topic",
+      stonefish_topic_);
+
+    stonefish_altitude_topic_ = get_param_or(
+      sensor_info,
+      "stonefish_altitude_topic",
+      stonefish_altitude_topic_);
+
+    stonefish_gps_topic_ = get_param_or(
+      sensor_info,
+      "stonefish_gps_topic",
+      stonefish_gps_topic_);
+  } catch (const std::exception & e) {
+    std::cerr << "[DVL] Error parsing parameters for sensor '"
+              << sensor_name_ << "': " << e.what() << std::endl;
+    return false;
+  }
+
+  if (environment_ == "real") {
+    if (!setupSocket()) {
+      return false;
+    }
+  }
+
+  if (environment_ == "sim") {
+    if (!sim_node_) {
+      std::cerr << "[DVL] sim_node is null in simulation mode" << std::endl;
+      return false;
+    }
+
+    if (stonefish_topic_.empty()) {
+      std::cerr << "[DVL] Missing parameter 'stonefish_topic' in sim mode"
+                << std::endl;
+      return false;
+    }
+
+    if (stonefish_altitude_topic_.empty()) {
+      std::cerr << "[DVL] Missing parameter 'stonefish_altitude_topic' in sim mode"
+                << std::endl;
+      return false;
+    }
+
+    if (stonefish_gps_topic_.empty()) {
+      std::cerr << "[DVL] Missing parameter 'stonefish_gps_topic' in sim mode"
+                << std::endl;
+      return false;
+    }
+
+    dvl_sub_ =
+      sim_node_->create_subscription<geometry_msgs::msg::TwistStamped>(
+      stonefish_topic_,
+      rclcpp::SensorDataQoS(),
+      [this](const geometry_msgs::msg::TwistStamped::SharedPtr msg)
+      {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+
+        last_rx_time_ = std::chrono::steady_clock::now();
+
+        last_vx_ = msg->twist.linear.x;
+        last_vy_ = msg->twist.linear.y;
+        last_vz_ = msg->twist.linear.z;
+
+        last_confidence_ = sim_dvl_confidence_;
+      });
+
+    altitude_sub_ =
+      sim_node_->create_subscription<std_msgs::msg::Float64>(
+      stonefish_altitude_topic_,
+      rclcpp::SensorDataQoS(),
+      [this](const std_msgs::msg::Float64::SharedPtr msg)
+      {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+
+        last_rx_time_ = std::chrono::steady_clock::now();
+
+        last_distance_z_ = msg->data;
+        last_distance_z_valid_ = true;
+      });
+
+    gps_sub_ =
+      sim_node_->create_subscription<sensor_msgs::msg::NavSatFix>(
+      stonefish_gps_topic_,
+      rclcpp::SensorDataQoS(),
+      [this](const sensor_msgs::msg::NavSatFix::SharedPtr msg)
+      {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+
+        last_rx_time_ = std::chrono::steady_clock::now();
+
+        last_gps_latitude_ = msg->latitude;
+        last_gps_longitude_ = msg->longitude;
+        last_gps_altitude_ = msg->altitude;
+
+        if (msg->status.status >= sensor_msgs::msg::NavSatStatus::STATUS_FIX) {
+          last_gps_valid_ = 1.0;
+        } else {
+          last_gps_valid_ = 0.0;
+        }
+      });
   }
 
   initialized_ = true;
@@ -61,7 +256,9 @@ bool DvlInterface::activate()
     return false;
   }
 
-  configureDvl();
+  if (environment_ == "real") {
+    configureDvl();
+  }
 
   {
     std::lock_guard<std::mutex> lock(data_mutex_);
@@ -71,6 +268,7 @@ bool DvlInterface::activate()
     last_vx_ = 0.0;
     last_vy_ = 0.0;
     last_vz_ = 0.0;
+
     last_confidence_ = 0.0;
 
     last_distance_z_ = 0.0;
@@ -96,29 +294,28 @@ bool DvlInterface::cleanup()
 {
   active_ = false;
   initialized_ = false;
-  closeSocket();
+
+  if (environment_ == "real") {
+    closeSocket();
+  }
+
+  dvl_sub_.reset();
+  altitude_sub_.reset();
+  gps_sub_.reset();
+  sim_node_.reset();
+
   return true;
 }
 
-bool DvlInterface::read(
-  double & linear_velocity_x,
-  double & linear_velocity_y,
-  double & linear_velocity_z,
-  double & angular_velocity_x,
-  double & angular_velocity_y,
-  double & angular_velocity_z,
-  double & distance_z,
-  double & confidence,
-  double & gps_latitude,
-  double & gps_longitude,
-  double & gps_altitude,
-  double & gps_valid)
+bool DvlInterface::read(std::unordered_map<std::string, double> & states)
 {
   if (!initialized_ || !active_) {
     return false;
   }
 
-  while (receiveAndParseOnce()) {
+  if (environment_ == "real") {
+    while (receiveAndParseOnce()) {
+    }
   }
 
   const auto now = std::chrono::steady_clock::now();
@@ -129,40 +326,40 @@ bool DvlInterface::read(
     std::chrono::duration<double>(now - last_rx_time_).count();
 
   if (age_s > timeout_s_) {
-    linear_velocity_x = 0.0;
-    linear_velocity_y = 0.0;
-    linear_velocity_z = 0.0;
+    set_state_if_exists(states, "linear_velocity.x", 0.0);
+    set_state_if_exists(states, "linear_velocity.y", 0.0);
+    set_state_if_exists(states, "linear_velocity.z", 0.0);
 
-    angular_velocity_x = 0.0;
-    angular_velocity_y = 0.0;
-    angular_velocity_z = 0.0;
+    set_state_if_exists(states, "angular_velocity.x", 0.0);
+    set_state_if_exists(states, "angular_velocity.y", 0.0);
+    set_state_if_exists(states, "angular_velocity.z", 0.0);
 
-    distance_z = 0.0;
-    confidence = 0.0;
+    set_state_if_exists(states, "distance_z", 0.0);
+    set_state_if_exists(states, "confidence", 0.0);
 
-    gps_latitude = 0.0;
-    gps_longitude = 0.0;
-    gps_altitude = 0.0;
-    gps_valid = 0.0;
+    set_state_if_exists(states, "gps.latitude", 0.0);
+    set_state_if_exists(states, "gps.longitude", 0.0);
+    set_state_if_exists(states, "gps.altitude", 0.0);
+    set_state_if_exists(states, "gps.valid", 0.0);
 
     return false;
   }
 
-  linear_velocity_x = last_vx_;
-  linear_velocity_y = last_vy_;
-  linear_velocity_z = last_vz_;
+  set_state_if_exists(states, "linear_velocity.x", last_vx_);
+  set_state_if_exists(states, "linear_velocity.y", last_vy_);
+  set_state_if_exists(states, "linear_velocity.z", last_vz_);
 
-  angular_velocity_x = 0.0;
-  angular_velocity_y = 0.0;
-  angular_velocity_z = 0.0;
+  set_state_if_exists(states, "angular_velocity.x", 0.0);
+  set_state_if_exists(states, "angular_velocity.y", 0.0);
+  set_state_if_exists(states, "angular_velocity.z", 0.0);
 
-  distance_z = last_distance_z_;
-  confidence = last_confidence_;
+  set_state_if_exists(states, "distance_z", last_distance_z_);
+  set_state_if_exists(states, "confidence", last_confidence_);
 
-  gps_latitude = last_gps_latitude_;
-  gps_longitude = last_gps_longitude_;
-  gps_altitude = last_gps_altitude_;
-  gps_valid = last_gps_valid_;
+  set_state_if_exists(states, "gps.latitude", last_gps_latitude_);
+  set_state_if_exists(states, "gps.longitude", last_gps_longitude_);
+  set_state_if_exists(states, "gps.altitude", last_gps_altitude_);
+  set_state_if_exists(states, "gps.valid", last_gps_valid_);
 
   return true;
 }
@@ -178,6 +375,7 @@ bool DvlInterface::setupSocket()
   }
 
   int reuse = 1;
+
   if (setsockopt(socket_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
     std::cerr << "[DVL] Error setting SO_REUSEADDR: "
               << std::strerror(errno) << std::endl;
@@ -198,6 +396,7 @@ bool DvlInterface::setupSocket()
   }
 
   const int flags = fcntl(socket_fd_, F_GETFL, 0);
+
   if (flags < 0) {
     std::cerr << "[DVL] Error getting socket flags: "
               << std::strerror(errno) << std::endl;
@@ -226,6 +425,10 @@ void DvlInterface::closeSocket()
 
 void DvlInterface::configureDvl()
 {
+  if (environment_ != "real") {
+    return;
+  }
+
   sendCommand("SEND-DVPDL ON");
   sendCommand("SEND-DVEXT ON");
 
@@ -235,12 +438,15 @@ void DvlInterface::configureDvl()
 
   sendCommand("RETWEET-IMU OFF");
 
-  // Montaje hacia abajo.
   sendCommand("SET-SENSOR-ORIENTATION 0,0,0");
 }
 
 void DvlInterface::sendCommand(const std::string & command)
 {
+  if (environment_ != "real") {
+    return;
+  }
+
   const int cmd_socket = socket(AF_INET, SOCK_DGRAM, 0);
 
   if (cmd_socket < 0) {
@@ -338,6 +544,10 @@ bool DvlInterface::receiveAndParseOnce()
         continue;
       }
 
+      if (confidence < min_confidence_) {
+        continue;
+      }
+
       {
         std::lock_guard<std::mutex> lock(data_mutex_);
 
@@ -422,14 +632,13 @@ bool DvlInterface::parseDvpdL(
     parts.push_back(item);
   }
 
-  // $DVPDL,tu,dtu,adr,adp,ady,pdx,pdy,pdz,c
   if (parts.size() < 10 || parts[0] != "$DVPDL") {
     return false;
   }
 
   try {
     const double dt_us = std::stod(parts[2]);
-    const double dt_s = dt_us / 1'000'000.0;
+    const double dt_s = dt_us / 1000000.0;
 
     if (dt_s <= 0.0) {
       return false;
@@ -551,7 +760,6 @@ bool DvlInterface::parseGprmc(
     latitude = nmeaCoordinateToDecimalDegrees(parts[3], parts[4], 90.0);
     longitude = nmeaCoordinateToDecimalDegrees(parts[5], parts[6], 180.0);
 
-    // RMC no trae altitud. Si luego quieres altitud real, parsea GGA.
     altitude = 0.0;
 
     valid = 1.0;
@@ -633,6 +841,7 @@ bool DvlInterface::hasValidNmeaChecksum(const std::string & line)
   }
 
   unsigned int calculated = 0;
+
   for (auto index = start + 1; index < checksum_pos; ++index) {
     calculated ^= static_cast<unsigned char>(line[index]);
   }
@@ -642,11 +851,14 @@ bool DvlInterface::hasValidNmeaChecksum(const std::string & line)
         return static_cast<unsigned int>(c - '0');
       }
 
-      const char upper = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+      const char upper = static_cast<char>(
+        std::toupper(static_cast<unsigned char>(c)));
+
       return static_cast<unsigned int>(upper - 'A' + 10);
     };
 
   const unsigned int expected = (hex_value(high) << 4) | hex_value(low);
+
   return calculated == expected;
 }
 
@@ -662,3 +874,7 @@ std::string DvlInterface::removeChecksum(const std::string & line)
 }
 
 }  // namespace sura_hardware_interface
+
+PLUGINLIB_EXPORT_CLASS(
+  sura_hardware_interface::DvlInterface,
+  sura_hardware_interface::SensorInterfaceBase)

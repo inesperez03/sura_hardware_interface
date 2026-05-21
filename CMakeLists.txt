@@ -6,10 +6,12 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
@@ -82,7 +84,7 @@ add_library(${PROJECT_NAME} SHARED
   src/sensors/leak_interface.cpp
 )
 
-target_include_directories(${PROJECT_NAME} PRIVATE
+target_include_directories(${PROJECT_NAME} PUBLIC
   include
 )
 
@@ -104,9 +106,11 @@ endif()
 
 ament_target_dependencies(${PROJECT_NAME}
   hardware_interface
+  ament_index_cpp
   pluginlib
   rclcpp
   rclcpp_lifecycle
+  geometry_msgs
   sensor_msgs
   std_msgs
 )
@@ -119,6 +123,11 @@ endif()
 
 pluginlib_export_plugin_description_file(
   hardware_interface
+  sura_hardware_plugins.xml
+)
+
+pluginlib_export_plugin_description_file(
+  sura_hardware_interface
   sura_hardware_plugins.xml
 )
 
@@ -151,12 +160,16 @@ endif()
 
 ament_export_dependencies(
   hardware_interface
+  ament_index_cpp
   pluginlib
   rclcpp
   rclcpp_lifecycle
+  geometry_msgs
   sensor_msgs
   std_msgs
 )
+
+ament_export_include_directories(include)
 
 if(SURA_ENABLE_STONEFISH)
   ament_export_dependencies(stonefish_ros2)

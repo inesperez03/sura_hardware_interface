@@ -1,26 +1,37 @@
 #pragma once
 
 #include <string>
+#include <unordered_map>
 
 #include <hardware_interface/hardware_info.hpp>
+
+#include "sura_hardware_interface/actuators/actuator_interface_base.hpp"
 
 namespace sura_hardware_interface
 {
 
-class LightsBluerovInterface
+class LightsBluerovInterface : public ActuatorInterfaceBase
 {
 public:
   bool initialize(
-    const hardware_interface::HardwareInfo & info,
-    const char * environment,
-    int lights_channel);
-  bool activate();
-  bool deactivate();
-  bool cleanup();
+    const hardware_interface::ComponentInfo & actuator_info,
+    const hardware_interface::HardwareInfo & hardware_info,
+    const std::string & environment) override;
+  bool activate() override;
+  bool deactivate() override;
+  bool cleanup() override;
 
-  bool write(double pwm_us);
+  bool read(
+    const std::unordered_map<std::string, double> & commands,
+    std::unordered_map<std::string, double> & states) override;
+
+  bool write(
+    const std::unordered_map<std::string, double> & commands,
+    std::unordered_map<std::string, double> & states) override;
 
 private:
+  bool write_command(double pwm_us);
+
   bool write_pwm_us(double pwm_us);
 
   std::string environment_{"real"};

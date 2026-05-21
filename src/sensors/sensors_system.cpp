@@ -1,80 +1,60 @@
 #include "sura_hardware_interface/sensors/sensors_system.hpp"
 
-#include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <exception>
-#include <limits>
+#include <memory>
 #include <string>
+#include <unordered_map>
+#include <utility>
 
-#include <pluginlib/class_list_macros.hpp>
+#include "pluginlib/class_list_macros.hpp"
+#include "pluginlib/exceptions.hpp"
 
 namespace sura_hardware_interface
 {
 
 namespace
 {
+
 const rclcpp::Logger kLogger = rclcpp::get_logger("SensorsSystem");
 
-std::string trim_namespace(std::string value)
-{
-  while (!value.empty() && value.front() == '/') {
-    value.erase(value.begin());
-  }
-
-  while (!value.empty() && value.back() == '/') {
-    value.pop_back();
-  }
-
-  if (value.empty()) {
-    return "cirtesub";
-  }
-
-  return value;
-}
-
-std::chrono::steady_clock::duration period_from_rate(double rate_hz)
-{
-  if (!std::isfinite(rate_hz) || rate_hz <= 0.0) {
-    return std::chrono::steady_clock::duration::max();
-  }
-
-  return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-    std::chrono::duration<double>(1.0 / rate_hz));
-}
 }  // namespace
 
-std::string SensorsSystem::parameter_or(
-  const std::string & name,
-  const std::string & default_value) const
+SensorsSystem::SensorsSystem()
+: sensor_interface_loader_(
+    "sura_hardware_interface",
+    "sura_hardware_interface::SensorInterfaceBase")
 {
-  const auto it = info_.hardware_parameters.find(name);
-  if (it == info_.hardware_parameters.end()) {
-    return default_value;
-  }
-
-  return it->second;
 }
 
-double SensorsSystem::parameter_or(const std::string & name, double default_value) const
+std::string SensorsSystem::parameter_or(
+  const std::unordered_map<std::string, std::string> & parameters,
+  const std::string & name,
+  const std::string & default_value)
 {
-  const auto it = info_.hardware_parameters.find(name);
-  if (it == info_.hardware_parameters.end()) {
+  const auto it = parameters.find(name);
+  return it == parameters.end() ? default_value : it->second;
+}
+
+bool SensorsSystem::has_parameter(
+  const hardware_interface::ComponentInfo & component,
+  const std::string & name)
+{
+  return component.parameters.find(name) != component.parameters.end();
+}
+
+double SensorsSystem::component_double_parameter_or(
+  const hardware_interface::ComponentInfo & component,
+  const std::string & name,
+  const double default_value)
+{
+  const auto it = component.parameters.find(name);
+
+  if (it == component.parameters.end()) {
     return default_value;
   }
 
-  try {
-    return std::stod(it->second);
-  } catch (const std::exception & e) {
-    RCLCPP_WARN(
-      kLogger,
-      "Invalid double hardware parameter '%s'='%s': %s. Using %.3f",
-      name.c_str(),
-      it->second.c_str(),
-      e.what(),
-      default_value);
-    return default_value;
-  }
+  return std::stod(it->second);
 }
 
 hardware_interface::CallbackReturn SensorsSystem::on_init(
@@ -83,397 +63,373 @@ hardware_interface::CallbackReturn SensorsSystem::on_init(
   if (hardware_interface::SystemInterface::on_init(info) !=
       hardware_interface::CallbackReturn::SUCCESS)
   {
-    RCLCPP_ERROR(kLogger, "Failed to initialize base SystemInterface");
     return hardware_interface::CallbackReturn::ERROR;
   }
 
-  info_ = info;
-  reset_sensor_state();
+  environment_ = parameter_or(info_.hardware_parameters, "environment", "real");
+
+  if (environment_ != "real" && environment_ != "sim") {
+    RCLCPP_ERROR(
+      kLogger,
+      "Unsupported environment '%s'. Use 'real' or 'sim'.",
+      environment_.c_str());
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  sensors_.clear();
+  sensors_.reserve(info_.sensors.size());
+
+  for (const auto & sensor_info : info_.sensors) {
+    if (!has_parameter(sensor_info, "interface")) {
+      RCLCPP_ERROR(
+        kLogger,
+        "Sensor '%s' has no required parameter 'interface'",
+        sensor_info.name.c_str());
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+
+    const std::string interface_name = sensor_info.parameters.at("interface");
+
+    pluginlib::UniquePtr<SensorInterfaceBase> sensor_interface;
+
+    try {
+      sensor_interface =
+        sensor_interface_loader_.createUniqueInstance(interface_name);
+    } catch (const pluginlib::PluginlibException & e) {
+      RCLCPP_ERROR(
+        kLogger,
+        "Failed to create interface '%s' for sensor '%s': %s",
+        interface_name.c_str(),
+        sensor_info.name.c_str(),
+        e.what());
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+
+    auto sensor = std::make_unique<SensorInstance>();
+    sensor->info = sensor_info;
+    sensor->interface = std::move(sensor_interface);
+
+    try {
+      sensor->read_rate_hz = component_double_parameter_or(
+        sensor_info,
+        "read_rate_hz",
+        0.0);
+    } catch (const std::exception & e) {
+      RCLCPP_ERROR(
+        kLogger,
+        "Invalid read_rate_hz for sensor '%s': %s",
+        sensor_info.name.c_str(),
+        e.what());
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+
+    sensor->use_thread = sensor->read_rate_hz > 0.0;
+
+    for (const auto & state_interface : sensor_info.state_interfaces) {
+      sensor->control_states[state_interface.name] = 0.0;
+      sensor->read_states[state_interface.name] = 0.0;
+    }
+
+    sensors_.push_back(std::move(sensor));
+  }
+
+  is_configured_ = false;
   is_active_ = false;
-
-  environment_ = parameter_or("environment", "real");
-  if (environment_ != "sim" && environment_ != "real") {
-    RCLCPP_ERROR(kLogger, "Unsupported environment '%s'. Use 'sim' or 'real'.", environment_.c_str());
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-
-  robot_namespace_ = trim_namespace(parameter_or("robot_namespace", "cirtesub"));
-  const std::string topic_root = "/" + robot_namespace_;
-
-  sim_imu_topic_ = parameter_or("sim_imu_topic", topic_root + "/stonefish/sensors/imu");
-  sim_magnetometer_topic_ =
-    parameter_or("sim_magnetometer_topic", topic_root + "/stonefish/sensors/magnetometer");
-  sim_pressure_topic_ = parameter_or("sim_pressure_topic", topic_root + "/stonefish/sensors/pressure");
-  sim_dvl_topic_ = parameter_or("sim_dvl_topic", topic_root + "/stonefish/sensors/dvl");
-  sim_dvl_altitude_topic_ =
-    parameter_or("sim_dvl_altitude_topic", topic_root + "/stonefish/sensors/dvl/altitude");
-  sim_gps_topic_ = parameter_or("sim_gps_topic", topic_root + "/stonefish/sensors/gps");
-
-  pressure_offset_pa_ = parameter_or("pressure_offset_pa", 101325.0);
-  sim_dvl_confidence_ = parameter_or("sim_dvl_confidence", 100.0);
-
-  pressure_read_rate_hz_ = parameter_or("pressure_read_rate_hz", 100.0);
-  dvl_read_rate_hz_ = parameter_or("dvl_read_rate_hz", 50.0);
-  battery_read_rate_hz_ = parameter_or("battery_read_rate_hz", 1.0);
-  leak_read_rate_hz_ = parameter_or("leak_read_rate_hz", 1.0);
-
-  const auto has_sensor = [this](const std::string & sensor_name) {
-    return std::any_of(
-      info_.sensors.begin(),
-      info_.sensors.end(),
-      [&sensor_name](const auto & sensor) {
-        return sensor.name == sensor_name;
-      });
-  };
-
-  has_imu_ = has_sensor(imu_sensor_name_);
-  has_magnetometer_ = has_sensor(magnetometer_sensor_name_);
-  has_pressure_ = has_sensor(pressure_sensor_name_);
-  has_battery_ = has_sensor(battery_sensor_name_);
-  has_leak_ = has_sensor(leak_sensor_name_);
-  has_dvl_ = has_sensor(dvl_sensor_name_);
-
-  if (!has_imu_) {
-    RCLCPP_ERROR(
-      kLogger,
-      "Sensor '%s' not found in ros2_control description",
-      imu_sensor_name_.c_str());
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-
-  if (!has_magnetometer_) {
-    RCLCPP_ERROR(
-      kLogger,
-      "Sensor '%s' not found in ros2_control description",
-      magnetometer_sensor_name_.c_str());
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-
-  if (!has_pressure_) {
-    RCLCPP_ERROR(
-      kLogger,
-      "Sensor '%s' not found in ros2_control description",
-      pressure_sensor_name_.c_str());
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-
-  if (!has_battery_) {
-    RCLCPP_ERROR(
-      kLogger,
-      "Sensor '%s' not found in ros2_control description",
-      battery_sensor_name_.c_str());
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-
-  if (!has_leak_) {
-    RCLCPP_WARN(
-      kLogger,
-      "Optional sensor '%s' not found in ros2_control description",
-      leak_sensor_name_.c_str());
-  }
-
-  if (!has_dvl_) {
-    RCLCPP_ERROR(
-      kLogger,
-      "Sensor '%s' not found in ros2_control description",
-      dvl_sensor_name_.c_str());
-    return hardware_interface::CallbackReturn::ERROR;
-  }
 
   RCLCPP_INFO(
     kLogger,
-    "SensorsSystem initialized for environment='%s', robot_namespace='%s'",
+    "SensorsSystem initialized for environment='%s' with %zu sensor(s)",
     environment_.c_str(),
-    robot_namespace_.c_str());
+    sensors_.size());
 
   return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+std::vector<hardware_interface::StateInterface>
+SensorsSystem::export_state_interfaces()
+{
+  std::vector<hardware_interface::StateInterface> state_interfaces;
+
+  for (auto & sensor : sensors_) {
+    for (const auto & state_interface : sensor->info.state_interfaces) {
+      state_interfaces.emplace_back(
+        sensor->info.name,
+        state_interface.name,
+        &sensor->control_states[state_interface.name]);
+    }
+  }
+
+  return state_interfaces;
+}
+
+std::vector<hardware_interface::CommandInterface>
+SensorsSystem::export_command_interfaces()
+{
+  return {};
 }
 
 hardware_interface::CallbackReturn SensorsSystem::on_configure(
   const rclcpp_lifecycle::State &)
 {
-  RCLCPP_INFO(kLogger, "Configuring SensorsSystem...");
+  stop_sensor_threads();
+  stop_sim_spin_thread();
 
-  reset_sensor_state();
-  reset_sim_subscribers();
+  reset_states();
 
   if (environment_ == "sim") {
-    configure_sim_subscribers();
-  } else {
-    if (!imu_.initialize(info_)) {
-      RCLCPP_ERROR(kLogger, "Failed to initialize IMU interface");
-      return hardware_interface::CallbackReturn::ERROR;
-    }
+    sim_node_ = std::make_shared<rclcpp::Node>("sura_sensors_system_sim");
+  }
 
-    if (!dvl_.initialize(info_)) {
-      RCLCPP_ERROR(kLogger, "Failed to initialize DVL interface");
-      return hardware_interface::CallbackReturn::ERROR;
-    }
-
-    if (!battery_.initialize(info_)) {
-      RCLCPP_ERROR(kLogger, "Failed to initialize battery interface");
-      return hardware_interface::CallbackReturn::ERROR;
-    }
-
-    if (has_leak_ && !leak_interface_.initialize(info_)) {
-      RCLCPP_ERROR(kLogger, "Failed to initialize leak interface");
+  for (auto & sensor : sensors_) {
+    if (!sensor->interface->initialize(
+          sensor->info,
+          info_,
+          environment_,
+          sim_node_))
+    {
+      RCLCPP_ERROR(
+        kLogger,
+        "Failed to initialize sensor '%s'",
+        sensor->info.name.c_str());
       return hardware_interface::CallbackReturn::ERROR;
     }
   }
 
+  is_configured_ = true;
   is_active_ = false;
 
-  RCLCPP_INFO(kLogger, "SensorsSystem configured successfully");
+  RCLCPP_INFO(kLogger, "SensorsSystem configured");
+
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn SensorsSystem::on_activate(
   const rclcpp_lifecycle::State &)
 {
-  RCLCPP_INFO(kLogger, "Activating SensorsSystem...");
+  if (!is_configured_) {
+    RCLCPP_ERROR(kLogger, "Cannot activate SensorsSystem before configure");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
 
-  if (environment_ == "real") {
-    if (!imu_.activate()) {
-      RCLCPP_ERROR(kLogger, "Failed to activate IMU");
+  for (auto & sensor : sensors_) {
+    if (!sensor->interface->activate()) {
+      RCLCPP_ERROR(
+        kLogger,
+        "Failed to activate sensor '%s'",
+        sensor->info.name.c_str());
       return hardware_interface::CallbackReturn::ERROR;
     }
-
-    if (!dvl_.activate()) {
-      RCLCPP_ERROR(kLogger, "Failed to activate DVL");
-      return hardware_interface::CallbackReturn::ERROR;
-    }
-
-    if (!battery_.activate()) {
-      RCLCPP_ERROR(kLogger, "Failed to activate battery");
-      return hardware_interface::CallbackReturn::ERROR;
-    }
-
-    if (has_leak_ && !leak_interface_.activate()) {
-      RCLCPP_ERROR(kLogger, "Failed to activate leak sensor");
-      return hardware_interface::CallbackReturn::ERROR;
-    }
-
-    poll_pressure_once();
-    poll_battery_once();
-
-    if (has_leak_) {
-      poll_leak_once();
-    }
-
-    poll_dvl_once();
-
-    start_real_sensor_threads();
   }
 
   is_active_ = true;
 
+  if (environment_ == "sim") {
+    start_sim_spin_thread();
+  }
+
+  start_sensor_threads();
+
   RCLCPP_INFO(kLogger, "SensorsSystem activated");
+
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn SensorsSystem::on_deactivate(
   const rclcpp_lifecycle::State &)
 {
-  RCLCPP_INFO(kLogger, "Deactivating SensorsSystem...");
-
   is_active_ = false;
 
-  if (environment_ == "real") {
-    stop_real_sensor_threads();
+  stop_sensor_threads();
+  stop_sim_spin_thread();
 
-    if (!imu_.deactivate()) {
-      RCLCPP_ERROR(kLogger, "Failed to deactivate IMU");
-      return hardware_interface::CallbackReturn::ERROR;
-    }
-
-    if (!dvl_.deactivate()) {
-      RCLCPP_ERROR(kLogger, "Failed to deactivate DVL");
-      return hardware_interface::CallbackReturn::ERROR;
-    }
-
-    if (!battery_.deactivate()) {
-      RCLCPP_ERROR(kLogger, "Failed to deactivate battery");
-      return hardware_interface::CallbackReturn::ERROR;
-    }
-
-    if (has_leak_ && !leak_interface_.deactivate()) {
-      RCLCPP_ERROR(kLogger, "Failed to deactivate leak sensor");
+  for (auto & sensor : sensors_) {
+    if (!sensor->interface->deactivate()) {
+      RCLCPP_ERROR(
+        kLogger,
+        "Failed to deactivate sensor '%s'",
+        sensor->info.name.c_str());
       return hardware_interface::CallbackReturn::ERROR;
     }
   }
 
   RCLCPP_INFO(kLogger, "SensorsSystem deactivated");
+
   return hardware_interface::CallbackReturn::SUCCESS;
-}
-
-std::vector<hardware_interface::StateInterface> SensorsSystem::export_state_interfaces()
-{
-  std::vector<hardware_interface::StateInterface> interfaces;
-
-  interfaces.reserve(
-    (has_imu_ ? 10U : 0U) +
-    (has_magnetometer_ ? 3U : 0U) +
-    (has_pressure_ ? 1U : 0U) +
-    (has_battery_ ? 3U : 0U) +
-    (has_leak_ ? 1U : 0U) +
-    (has_dvl_ ? 12U : 0U));
-
-  if (has_imu_) {
-    interfaces.emplace_back(imu_sensor_name_, "orientation.x", &orientation_x_);
-    interfaces.emplace_back(imu_sensor_name_, "orientation.y", &orientation_y_);
-    interfaces.emplace_back(imu_sensor_name_, "orientation.z", &orientation_z_);
-    interfaces.emplace_back(imu_sensor_name_, "orientation.w", &orientation_w_);
-
-    interfaces.emplace_back(imu_sensor_name_, "angular_velocity.x", &angular_velocity_x_);
-    interfaces.emplace_back(imu_sensor_name_, "angular_velocity.y", &angular_velocity_y_);
-    interfaces.emplace_back(imu_sensor_name_, "angular_velocity.z", &angular_velocity_z_);
-
-    interfaces.emplace_back(imu_sensor_name_, "linear_acceleration.x", &linear_acceleration_x_);
-    interfaces.emplace_back(imu_sensor_name_, "linear_acceleration.y", &linear_acceleration_y_);
-    interfaces.emplace_back(imu_sensor_name_, "linear_acceleration.z", &linear_acceleration_z_);
-  }
-
-  if (has_magnetometer_) {
-    interfaces.emplace_back(magnetometer_sensor_name_, "magnetic_field.x", &magnetic_field_x_);
-    interfaces.emplace_back(magnetometer_sensor_name_, "magnetic_field.y", &magnetic_field_y_);
-    interfaces.emplace_back(magnetometer_sensor_name_, "magnetic_field.z", &magnetic_field_z_);
-  }
-
-  if (has_pressure_) {
-    interfaces.emplace_back(pressure_sensor_name_, "fluid_pressure", &fluid_pressure_);
-  }
-
-  if (has_battery_) {
-    interfaces.emplace_back(battery_sensor_name_, "voltage", &battery_voltage_);
-    interfaces.emplace_back(battery_sensor_name_, "current", &battery_current_);
-    interfaces.emplace_back(battery_sensor_name_, "present", &battery_present_);
-  }
-
-  if (has_leak_) {
-    interfaces.emplace_back(leak_sensor_name_, "leak", &leak_);
-  }
-
-  if (has_dvl_) {
-    interfaces.emplace_back(dvl_sensor_name_, "linear_velocity.x", &dvl_linear_velocity_x_);
-    interfaces.emplace_back(dvl_sensor_name_, "linear_velocity.y", &dvl_linear_velocity_y_);
-    interfaces.emplace_back(dvl_sensor_name_, "linear_velocity.z", &dvl_linear_velocity_z_);
-
-    interfaces.emplace_back(dvl_sensor_name_, "angular_velocity.x", &dvl_angular_velocity_x_);
-    interfaces.emplace_back(dvl_sensor_name_, "angular_velocity.y", &dvl_angular_velocity_y_);
-    interfaces.emplace_back(dvl_sensor_name_, "angular_velocity.z", &dvl_angular_velocity_z_);
-
-    interfaces.emplace_back(dvl_sensor_name_, "distance_z", &dvl_distance_z_);
-    interfaces.emplace_back(dvl_sensor_name_, "confidence", &dvl_confidence_);
-
-    interfaces.emplace_back(dvl_sensor_name_, "gps.latitude", &dvl_gps_latitude_);
-    interfaces.emplace_back(dvl_sensor_name_, "gps.longitude", &dvl_gps_longitude_);
-    interfaces.emplace_back(dvl_sensor_name_, "gps.altitude", &dvl_gps_altitude_);
-    interfaces.emplace_back(dvl_sensor_name_, "gps.valid", &dvl_gps_valid_);
-  }
-
-  return interfaces;
-}
-
-std::vector<hardware_interface::CommandInterface> SensorsSystem::export_command_interfaces()
-{
-  return {};
 }
 
 hardware_interface::CallbackReturn SensorsSystem::on_cleanup(
   const rclcpp_lifecycle::State &)
 {
-  RCLCPP_INFO(kLogger, "Cleaning up SensorsSystem...");
-
   is_active_ = false;
 
-  if (environment_ == "real") {
-    stop_real_sensor_threads();
+  stop_sensor_threads();
+  stop_sim_spin_thread();
 
-    if (!imu_.cleanup()) {
-      RCLCPP_ERROR(kLogger, "Failed to cleanup IMU");
-      return hardware_interface::CallbackReturn::ERROR;
-    }
-
-    if (!dvl_.cleanup()) {
-      RCLCPP_ERROR(kLogger, "Failed to cleanup DVL");
-      return hardware_interface::CallbackReturn::ERROR;
-    }
-
-    if (!battery_.cleanup()) {
-      RCLCPP_ERROR(kLogger, "Failed to cleanup battery");
-      return hardware_interface::CallbackReturn::ERROR;
-    }
-
-    if (has_leak_ && !leak_interface_.cleanup()) {
-      RCLCPP_ERROR(kLogger, "Failed to cleanup leak sensor");
+  for (auto & sensor : sensors_) {
+    if (!sensor->interface->cleanup()) {
+      RCLCPP_ERROR(
+        kLogger,
+        "Failed to cleanup sensor '%s'",
+        sensor->info.name.c_str());
       return hardware_interface::CallbackReturn::ERROR;
     }
   }
 
-  reset_sim_subscribers();
-  reset_sensor_state();
+  reset_states();
+
+  sim_node_.reset();
+
+  is_configured_ = false;
 
   RCLCPP_INFO(kLogger, "SensorsSystem cleaned up");
+
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn SensorsSystem::on_shutdown(
   const rclcpp_lifecycle::State &)
 {
-  RCLCPP_INFO(kLogger, "Shutting down SensorsSystem...");
-
   is_active_ = false;
 
-  if (environment_ == "real") {
-    stop_real_sensor_threads();
+  stop_sensor_threads();
+  stop_sim_spin_thread();
 
-    (void)imu_.deactivate();
-    (void)imu_.cleanup();
-    (void)dvl_.deactivate();
-    (void)dvl_.cleanup();
-    (void)battery_.deactivate();
-    (void)battery_.cleanup();
-
-    if (has_leak_) {
-      (void)leak_interface_.deactivate();
-      (void)leak_interface_.cleanup();
-    }
+  for (auto & sensor : sensors_) {
+    (void)sensor->interface->deactivate();
+    (void)sensor->interface->cleanup();
   }
 
-  reset_sim_subscribers();
-  reset_sensor_state();
+  reset_states();
 
-  RCLCPP_INFO(kLogger, "SensorsSystem shutdown completed");
+  sim_node_.reset();
+
+  is_configured_ = false;
+
+  RCLCPP_INFO(kLogger, "SensorsSystem shutdown");
+
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn SensorsSystem::on_error(
-  const rclcpp_lifecycle::State &)
+  const rclcpp_lifecycle::State & previous_state)
 {
-  RCLCPP_ERROR(kLogger, "SensorsSystem entered error state");
+  return on_shutdown(previous_state);
+}
 
-  is_active_ = false;
-
-  if (environment_ == "real") {
-    stop_real_sensor_threads();
-
-    (void)imu_.deactivate();
-    (void)imu_.cleanup();
-    (void)dvl_.deactivate();
-    (void)dvl_.cleanup();
-    (void)battery_.deactivate();
-    (void)battery_.cleanup();
-
-    if (has_leak_) {
-      (void)leak_interface_.deactivate();
-      (void)leak_interface_.cleanup();
+void SensorsSystem::start_sensor_threads()
+{
+  for (auto & sensor : sensors_) {
+    if (!sensor->use_thread) {
+      continue;
     }
+
+    if (sensor->read_thread_running.load()) {
+      continue;
+    }
+
+    sensor->read_thread_running.store(true);
+
+    sensor->read_thread = std::thread(
+      [this, sensor_ptr = sensor.get()]()
+      {
+        sensor_read_loop(sensor_ptr);
+      });
+
+    RCLCPP_INFO(
+      kLogger,
+      "Started read thread for sensor '%s' at %.3f Hz",
+      sensor->info.name.c_str(),
+      sensor->read_rate_hz);
+  }
+}
+
+void SensorsSystem::stop_sensor_threads()
+{
+  for (auto & sensor : sensors_) {
+    sensor->read_thread_running.store(false);
   }
 
-  reset_sim_subscribers();
-  reset_sensor_state();
+  for (auto & sensor : sensors_) {
+    if (sensor->read_thread.joinable()) {
+      sensor->read_thread.join();
+    }
+  }
+}
 
-  return hardware_interface::CallbackReturn::SUCCESS;
+void SensorsSystem::sensor_read_loop(SensorInstance * sensor)
+{
+  if (!sensor) {
+    return;
+  }
+
+  const double rate_hz = sensor->read_rate_hz;
+
+  if (rate_hz <= 0.0) {
+    return;
+  }
+
+  const auto period = std::chrono::duration<double>(1.0 / rate_hz);
+  auto next_time = std::chrono::steady_clock::now();
+
+  std::unordered_map<std::string, double> local_states;
+
+  {
+    std::lock_guard<std::mutex> lock(sensor->states_mutex);
+    local_states = sensor->read_states;
+  }
+
+  while (sensor->read_thread_running.load()) {
+    const bool ok = sensor->interface->read(local_states);
+    sensor->last_read_ok.store(ok);
+
+    {
+      std::lock_guard<std::mutex> lock(sensor->states_mutex);
+      sensor->read_states = local_states;
+    }
+
+    next_time += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      period);
+
+    std::this_thread::sleep_until(next_time);
+  }
+}
+
+void SensorsSystem::start_sim_spin_thread()
+{
+  if (!sim_node_) {
+    return;
+  }
+
+  if (sim_spin_running_.load()) {
+    return;
+  }
+
+  sim_spin_running_.store(true);
+
+  sim_spin_thread_ = std::thread(
+    [this]()
+    {
+      const auto period = std::chrono::milliseconds(2);
+      auto next_time = std::chrono::steady_clock::now();
+
+      while (sim_spin_running_.load()) {
+        rclcpp::spin_some(sim_node_);
+
+        next_time += period;
+        std::this_thread::sleep_until(next_time);
+      }
+    });
+
+  RCLCPP_INFO(kLogger, "Started simulation spin thread");
+}
+
+void SensorsSystem::stop_sim_spin_thread()
+{
+  sim_spin_running_.store(false);
+
+  if (sim_spin_thread_.joinable()) {
+    sim_spin_thread_.join();
+  }
 }
 
 hardware_interface::return_type SensorsSystem::read(
@@ -484,255 +440,57 @@ hardware_interface::return_type SensorsSystem::read(
     return hardware_interface::return_type::OK;
   }
 
-  if (environment_ == "sim") {
-    if (sim_node_) {
-      rclcpp::spin_some(sim_node_);
+  for (auto & sensor : sensors_) {
+    if (sensor->use_thread) {
+      std::lock_guard<std::mutex> lock(sensor->states_mutex);
+
+      for (const auto & state : sensor->read_states) {
+        sensor->control_states[state.first] = state.second;
+      }
+
+      if (!sensor->last_read_ok.load()) {
+        RCLCPP_WARN_THROTTLE(
+          kLogger,
+          *rclcpp::Clock::make_shared(),
+          2000,
+          "Last read failed for sensor '%s'",
+          sensor->info.name.c_str());
+      }
+
+      continue;
     }
-    return hardware_interface::return_type::OK;
-  }
 
-  const bool imu_ok = imu_.read(
-    orientation_x_, orientation_y_, orientation_z_, orientation_w_,
-    angular_velocity_x_, angular_velocity_y_, angular_velocity_z_,
-    linear_acceleration_x_, linear_acceleration_y_, linear_acceleration_z_);
+    std::unordered_map<std::string, double> local_states;
 
-  if (!imu_ok) {
-    RCLCPP_ERROR(kLogger, "Failed to read IMU data");
-    return hardware_interface::return_type::ERROR;
-  }
+    {
+      std::lock_guard<std::mutex> lock(sensor->states_mutex);
+      local_states = sensor->read_states;
+    }
 
-  const bool mag_ok = magnetometer_.read(
-    magnetic_field_x_, magnetic_field_y_, magnetic_field_z_);
+    const bool ok = sensor->interface->read(local_states);
+    sensor->last_read_ok.store(ok);
 
-  if (!mag_ok) {
-    RCLCPP_ERROR(kLogger, "Failed to read magnetometer data");
-    return hardware_interface::return_type::ERROR;
-  }
+    {
+      std::lock_guard<std::mutex> lock(sensor->states_mutex);
 
-  {
-    std::lock_guard<std::mutex> lock(real_sensor_cache_mutex_);
+      sensor->read_states = local_states;
 
-    fluid_pressure_ = cached_fluid_pressure_;
+      for (const auto & state : sensor->read_states) {
+        sensor->control_states[state.first] = state.second;
+      }
+    }
 
-    battery_voltage_ = cached_battery_voltage_;
-    battery_current_ = cached_battery_current_;
-    battery_present_ = cached_battery_present_;
-
-    leak_ = cached_leak_;
-
-    dvl_linear_velocity_x_ = cached_dvl_linear_velocity_x_;
-    dvl_linear_velocity_y_ = cached_dvl_linear_velocity_y_;
-    dvl_linear_velocity_z_ = cached_dvl_linear_velocity_z_;
-    dvl_angular_velocity_x_ = cached_dvl_angular_velocity_x_;
-    dvl_angular_velocity_y_ = cached_dvl_angular_velocity_y_;
-    dvl_angular_velocity_z_ = cached_dvl_angular_velocity_z_;
-    dvl_distance_z_ = cached_dvl_distance_z_;
-    dvl_confidence_ = cached_dvl_confidence_;
-    dvl_gps_latitude_ = cached_dvl_gps_latitude_;
-    dvl_gps_longitude_ = cached_dvl_gps_longitude_;
-    dvl_gps_altitude_ = cached_dvl_gps_altitude_;
-    dvl_gps_valid_ = cached_dvl_gps_valid_;
+    if (!ok) {
+      RCLCPP_WARN_THROTTLE(
+        kLogger,
+        *rclcpp::Clock::make_shared(),
+        2000,
+        "Failed to read sensor '%s'",
+        sensor->info.name.c_str());
+    }
   }
 
   return hardware_interface::return_type::OK;
-}
-
-void SensorsSystem::start_real_sensor_threads()
-{
-  stop_real_sensor_threads();
-
-  real_sensor_threads_running_.store(true);
-
-  pressure_thread_ = std::thread(&SensorsSystem::pressure_poll_loop, this);
-  battery_thread_ = std::thread(&SensorsSystem::battery_poll_loop, this);
-
-  if (has_leak_) {
-    leak_thread_ = std::thread(&SensorsSystem::leak_poll_loop, this);
-  }
-
-  dvl_thread_ = std::thread(&SensorsSystem::dvl_poll_loop, this);
-}
-
-void SensorsSystem::stop_real_sensor_threads()
-{
-  real_sensor_threads_running_.store(false);
-
-  if (pressure_thread_.joinable()) {
-    pressure_thread_.join();
-  }
-
-  if (battery_thread_.joinable()) {
-    battery_thread_.join();
-  }
-
-  if (leak_thread_.joinable()) {
-    leak_thread_.join();
-  }
-
-  if (dvl_thread_.joinable()) {
-    dvl_thread_.join();
-  }
-}
-
-void SensorsSystem::pressure_poll_loop()
-{
-  const auto period = period_from_rate(pressure_read_rate_hz_);
-  auto next = std::chrono::steady_clock::now();
-
-  while (real_sensor_threads_running_.load()) {
-    poll_pressure_once();
-
-    if (period == std::chrono::steady_clock::duration::max()) {
-      break;
-    }
-
-    next += period;
-    std::this_thread::sleep_until(next);
-  }
-}
-
-void SensorsSystem::battery_poll_loop()
-{
-  const auto period = period_from_rate(battery_read_rate_hz_);
-  auto next = std::chrono::steady_clock::now();
-
-  while (real_sensor_threads_running_.load()) {
-    poll_battery_once();
-
-    if (period == std::chrono::steady_clock::duration::max()) {
-      break;
-    }
-
-    next += period;
-    std::this_thread::sleep_until(next);
-  }
-}
-
-void SensorsSystem::leak_poll_loop()
-{
-  const auto period = period_from_rate(leak_read_rate_hz_);
-  auto next = std::chrono::steady_clock::now();
-
-  while (real_sensor_threads_running_.load()) {
-    poll_leak_once();
-
-    if (period == std::chrono::steady_clock::duration::max()) {
-      break;
-    }
-
-    next += period;
-    std::this_thread::sleep_until(next);
-  }
-}
-
-void SensorsSystem::dvl_poll_loop()
-{
-  const auto period = period_from_rate(dvl_read_rate_hz_);
-  auto next = std::chrono::steady_clock::now();
-
-  while (real_sensor_threads_running_.load()) {
-    poll_dvl_once();
-
-    if (period == std::chrono::steady_clock::duration::max()) {
-      break;
-    }
-
-    next += period;
-    std::this_thread::sleep_until(next);
-  }
-}
-
-void SensorsSystem::poll_pressure_once()
-{
-  double pressure_mbar = 0.0;
-  if (!pressure_.read(pressure_mbar)) {
-    return;
-  }
-
-  const double pressure_pa = pressure_mbar * 100.0;
-  const double fluid_pressure = std::max(0.0, pressure_pa - pressure_offset_pa_);
-
-  std::lock_guard<std::mutex> lock(real_sensor_cache_mutex_);
-  cached_fluid_pressure_ = fluid_pressure;
-}
-
-void SensorsSystem::poll_battery_once()
-{
-  double voltage = std::numeric_limits<double>::quiet_NaN();
-  double current = std::numeric_limits<double>::quiet_NaN();
-  double present = 0.0;
-
-  if (!battery_.read(voltage, current, present)) {
-    return;
-  }
-
-  std::lock_guard<std::mutex> lock(real_sensor_cache_mutex_);
-  cached_battery_voltage_ = voltage;
-  cached_battery_current_ = current;
-  cached_battery_present_ = present;
-}
-
-void SensorsSystem::poll_leak_once()
-{
-  if (!has_leak_) {
-    return;
-  }
-
-  double leak = 0.0;
-
-  if (!leak_interface_.read(leak)) {
-    return;
-  }
-
-  std::lock_guard<std::mutex> lock(real_sensor_cache_mutex_);
-  cached_leak_ = leak;
-}
-
-void SensorsSystem::poll_dvl_once()
-{
-  double linear_velocity_x = 0.0;
-  double linear_velocity_y = 0.0;
-  double linear_velocity_z = 0.0;
-  double angular_velocity_x = 0.0;
-  double angular_velocity_y = 0.0;
-  double angular_velocity_z = 0.0;
-  double distance_z = 0.0;
-  double confidence = 0.0;
-  double gps_latitude = 0.0;
-  double gps_longitude = 0.0;
-  double gps_altitude = 0.0;
-  double gps_valid = 0.0;
-
-  if (!dvl_.read(
-      linear_velocity_x,
-      linear_velocity_y,
-      linear_velocity_z,
-      angular_velocity_x,
-      angular_velocity_y,
-      angular_velocity_z,
-      distance_z,
-      confidence,
-      gps_latitude,
-      gps_longitude,
-      gps_altitude,
-      gps_valid))
-  {
-    gps_valid = 0.0;
-  }
-
-  std::lock_guard<std::mutex> lock(real_sensor_cache_mutex_);
-  cached_dvl_linear_velocity_x_ = linear_velocity_x;
-  cached_dvl_linear_velocity_y_ = linear_velocity_y;
-  cached_dvl_linear_velocity_z_ = linear_velocity_z;
-  cached_dvl_angular_velocity_x_ = angular_velocity_x;
-  cached_dvl_angular_velocity_y_ = angular_velocity_y;
-  cached_dvl_angular_velocity_z_ = angular_velocity_z;
-  cached_dvl_distance_z_ = distance_z;
-  cached_dvl_confidence_ = confidence;
-  cached_dvl_gps_latitude_ = gps_latitude;
-  cached_dvl_gps_longitude_ = gps_longitude;
-  cached_dvl_gps_altitude_ = gps_altitude;
-  cached_dvl_gps_valid_ = gps_valid;
 }
 
 hardware_interface::return_type SensorsSystem::write(
@@ -742,214 +500,21 @@ hardware_interface::return_type SensorsSystem::write(
   return hardware_interface::return_type::OK;
 }
 
-void SensorsSystem::configure_sim_subscribers()
+void SensorsSystem::reset_states()
 {
-  sim_node_ = std::make_shared<rclcpp::Node>(
-    "sura_sensors_system_sim_" + robot_namespace_);
+  for (auto & sensor : sensors_) {
+    std::lock_guard<std::mutex> lock(sensor->states_mutex);
 
-  sim_imu_sub_ = sim_node_->create_subscription<sensor_msgs::msg::Imu>(
-    sim_imu_topic_, rclcpp::SensorDataQoS(),
-    [this](const sensor_msgs::msg::Imu::SharedPtr msg) {
-      sim_imu_callback(msg);
-    });
+    for (auto & state : sensor->control_states) {
+      state.second = 0.0;
+    }
 
-  sim_magnetometer_sub_ = sim_node_->create_subscription<sensor_msgs::msg::MagneticField>(
-    sim_magnetometer_topic_, rclcpp::SensorDataQoS(),
-    [this](const sensor_msgs::msg::MagneticField::SharedPtr msg) {
-      sim_magnetometer_callback(msg);
-    });
+    for (auto & state : sensor->read_states) {
+      state.second = 0.0;
+    }
 
-  sim_pressure_sub_ = sim_node_->create_subscription<sensor_msgs::msg::FluidPressure>(
-    sim_pressure_topic_, rclcpp::SensorDataQoS(),
-    [this](const sensor_msgs::msg::FluidPressure::SharedPtr msg) {
-      sim_pressure_callback(msg);
-    });
-
-#if SURA_HAS_STONEFISH
-  sim_dvl_sub_ = sim_node_->create_subscription<stonefish_ros2::msg::DVL>(
-    sim_dvl_topic_, rclcpp::SensorDataQoS(),
-    [this](const stonefish_ros2::msg::DVL::SharedPtr msg) {
-      sim_dvl_callback(msg);
-    });
-#else
-  RCLCPP_WARN(
-    kLogger,
-    "Stonefish support is disabled in this build. Skipping simulated DVL velocity subscriber '%s'.",
-    sim_dvl_topic_.c_str());
-#endif
-
-  sim_dvl_altitude_sub_ = sim_node_->create_subscription<sensor_msgs::msg::Range>(
-    sim_dvl_altitude_topic_, rclcpp::SensorDataQoS(),
-    [this](const sensor_msgs::msg::Range::SharedPtr msg) {
-      sim_dvl_altitude_callback(msg);
-    });
-
-  sim_gps_sub_ = sim_node_->create_subscription<sensor_msgs::msg::NavSatFix>(
-    sim_gps_topic_, rclcpp::SensorDataQoS(),
-    [this](const sensor_msgs::msg::NavSatFix::SharedPtr msg) {
-      sim_gps_callback(msg);
-    });
-
-  RCLCPP_INFO(
-    kLogger,
-    "Configured simulation sensor subscribers: imu='%s', mag='%s', pressure='%s', dvl='%s', altitude='%s', gps='%s'",
-    sim_imu_topic_.c_str(),
-    sim_magnetometer_topic_.c_str(),
-    sim_pressure_topic_.c_str(),
-    sim_dvl_topic_.c_str(),
-    sim_dvl_altitude_topic_.c_str(),
-    sim_gps_topic_.c_str());
-}
-
-void SensorsSystem::reset_sim_subscribers()
-{
-  sim_imu_sub_.reset();
-  sim_magnetometer_sub_.reset();
-  sim_pressure_sub_.reset();
-
-#if SURA_HAS_STONEFISH
-  sim_dvl_sub_.reset();
-#endif
-
-  sim_dvl_altitude_sub_.reset();
-  sim_gps_sub_.reset();
-  sim_node_.reset();
-}
-
-void SensorsSystem::sim_imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg)
-{
-  orientation_x_ = msg->orientation.x;
-  orientation_y_ = msg->orientation.y;
-  orientation_z_ = msg->orientation.z;
-  orientation_w_ = msg->orientation.w;
-
-  angular_velocity_x_ = msg->angular_velocity.x;
-  angular_velocity_y_ = msg->angular_velocity.y;
-  angular_velocity_z_ = msg->angular_velocity.z;
-
-  linear_acceleration_x_ = msg->linear_acceleration.x;
-  linear_acceleration_y_ = msg->linear_acceleration.y;
-  linear_acceleration_z_ = msg->linear_acceleration.z;
-}
-
-void SensorsSystem::sim_magnetometer_callback(
-  const sensor_msgs::msg::MagneticField::SharedPtr msg)
-{
-  magnetic_field_x_ = msg->magnetic_field.x;
-  magnetic_field_y_ = msg->magnetic_field.y;
-  magnetic_field_z_ = msg->magnetic_field.z;
-}
-
-void SensorsSystem::sim_pressure_callback(
-  const sensor_msgs::msg::FluidPressure::SharedPtr msg)
-{
-  fluid_pressure_ = msg->fluid_pressure;
-}
-
-#if SURA_HAS_STONEFISH
-void SensorsSystem::sim_dvl_callback(const stonefish_ros2::msg::DVL::SharedPtr msg)
-{
-  dvl_linear_velocity_x_ = msg->velocity.x;
-  dvl_linear_velocity_y_ = msg->velocity.y;
-  dvl_linear_velocity_z_ = msg->velocity.z;
-
-  dvl_angular_velocity_x_ = 0.0;
-  dvl_angular_velocity_y_ = 0.0;
-  dvl_angular_velocity_z_ = 0.0;
-
-  if (std::isfinite(msg->altitude) && msg->altitude >= 0.0) {
-    dvl_distance_z_ = msg->altitude;
-    dvl_confidence_ = sim_dvl_confidence_;
-  } else {
-    dvl_confidence_ = 0.0;
+    sensor->last_read_ok.store(true);
   }
-}
-#endif
-
-void SensorsSystem::sim_dvl_altitude_callback(
-  const sensor_msgs::msg::Range::SharedPtr msg)
-{
-  if (std::isfinite(msg->range) && msg->range >= 0.0) {
-    dvl_distance_z_ = msg->range;
-    dvl_confidence_ = sim_dvl_confidence_;
-  } else {
-    dvl_confidence_ = 0.0;
-  }
-}
-
-void SensorsSystem::sim_gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg)
-{
-  dvl_gps_latitude_ = msg->latitude;
-  dvl_gps_longitude_ = msg->longitude;
-  dvl_gps_altitude_ = msg->altitude;
-  dvl_gps_valid_ = msg->status.status >= sensor_msgs::msg::NavSatStatus::STATUS_FIX ? 1.0 : 0.0;
-}
-
-void SensorsSystem::reset_sensor_state()
-{
-  orientation_x_ = 0.0;
-  orientation_y_ = 0.0;
-  orientation_z_ = 0.0;
-  orientation_w_ = 1.0;
-
-  angular_velocity_x_ = 0.0;
-  angular_velocity_y_ = 0.0;
-  angular_velocity_z_ = 0.0;
-
-  linear_acceleration_x_ = 0.0;
-  linear_acceleration_y_ = 0.0;
-  linear_acceleration_z_ = 0.0;
-
-  magnetic_field_x_ = 0.0;
-  magnetic_field_y_ = 0.0;
-  magnetic_field_z_ = 0.0;
-
-  fluid_pressure_ = 0.0;
-
-  battery_voltage_ = std::numeric_limits<double>::quiet_NaN();
-  battery_current_ = std::numeric_limits<double>::quiet_NaN();
-  battery_present_ = 0.0;
-
-  leak_ = 0.0;
-
-  dvl_linear_velocity_x_ = 0.0;
-  dvl_linear_velocity_y_ = 0.0;
-  dvl_linear_velocity_z_ = 0.0;
-
-  dvl_angular_velocity_x_ = 0.0;
-  dvl_angular_velocity_y_ = 0.0;
-  dvl_angular_velocity_z_ = 0.0;
-
-  dvl_distance_z_ = 0.0;
-  dvl_confidence_ = 0.0;
-
-  dvl_gps_latitude_ = 0.0;
-  dvl_gps_longitude_ = 0.0;
-  dvl_gps_altitude_ = 0.0;
-  dvl_gps_valid_ = 0.0;
-
-  std::lock_guard<std::mutex> lock(real_sensor_cache_mutex_);
-
-  cached_fluid_pressure_ = fluid_pressure_;
-
-  cached_battery_voltage_ = battery_voltage_;
-  cached_battery_current_ = battery_current_;
-  cached_battery_present_ = battery_present_;
-
-  cached_leak_ = leak_;
-
-  cached_dvl_linear_velocity_x_ = dvl_linear_velocity_x_;
-  cached_dvl_linear_velocity_y_ = dvl_linear_velocity_y_;
-  cached_dvl_linear_velocity_z_ = dvl_linear_velocity_z_;
-  cached_dvl_angular_velocity_x_ = dvl_angular_velocity_x_;
-  cached_dvl_angular_velocity_y_ = dvl_angular_velocity_y_;
-  cached_dvl_angular_velocity_z_ = dvl_angular_velocity_z_;
-  cached_dvl_distance_z_ = dvl_distance_z_;
-  cached_dvl_confidence_ = dvl_confidence_;
-  cached_dvl_gps_latitude_ = dvl_gps_latitude_;
-  cached_dvl_gps_longitude_ = dvl_gps_longitude_;
-  cached_dvl_gps_altitude_ = dvl_gps_altitude_;
-  cached_dvl_gps_valid_ = dvl_gps_valid_;
 }
 
 }  // namespace sura_hardware_interface

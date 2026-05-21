@@ -7,7 +7,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "pluginlib/class_list_macros.hpp"
 
 namespace sura_hardware_interface
 {
@@ -17,6 +22,25 @@ namespace
 
 constexpr double kMinLightsPwmUs = 1100.0;
 constexpr double kMaxLightsPwmUs = 1900.0;
+
+bool has_single_interface(
+  const std::vector<hardware_interface::InterfaceInfo> & interfaces,
+  const std::string & name)
+{
+  return interfaces.size() == 1 && interfaces[0].name == name;
+}
+
+int required_channel(const hardware_interface::ComponentInfo & actuator_info)
+{
+  const auto it = actuator_info.parameters.find("channel");
+
+  if (it == actuator_info.parameters.end()) {
+    throw std::runtime_error(
+      "Actuator joint '" + actuator_info.name + "' is missing required parameter 'channel'");
+  }
+
+  return std::stoi(it->second);
+}
 
 #ifdef TARGET_RASPBERRY
 uint16_t pulse_us_to_counts(double pulse_us, double freq_hz)
@@ -40,16 +64,28 @@ double clamp_lights_pwm(double pwm_us)
 }  // namespace
 
 bool LightsBluerovInterface::initialize(
+  const hardware_interface::ComponentInfo & actuator_info,
   const hardware_interface::HardwareInfo &,
-  const char * environment,
-  int lights_channel)
+  const std::string & environment)
 {
   if (initialized_) {
     return true;
   }
 
+  if (
+    !has_single_interface(actuator_info.command_interfaces, "pwm_us") ||
+    !has_single_interface(actuator_info.state_interfaces, "pwm_us"))
+  {
+    return false;
+  }
+
   environment_ = environment;
-  lights_channel_ = lights_channel;
+
+  try {
+    lights_channel_ = required_channel(actuator_info);
+  } catch (const std::exception &) {
+    return false;
+  }
 
   if (environment_ == "real") {
 #ifdef TARGET_RASPBERRY
@@ -82,13 +118,13 @@ bool LightsBluerovInterface::activate()
   }
 
   active_ = true;
-  return write(kMinLightsPwmUs);
+  return write_command(kMinLightsPwmUs);
 }
 
 bool LightsBluerovInterface::deactivate()
 {
   if (initialized_ && active_) {
-    (void)write(kMinLightsPwmUs);
+    (void)write_command(kMinLightsPwmUs);
   }
 
   active_ = false;
@@ -101,7 +137,7 @@ bool LightsBluerovInterface::cleanup()
     const bool was_active = active_;
     active_ = true;
     if (was_active || environment_ == "real") {
-      (void)write(kMinLightsPwmUs);
+      (void)write_command(kMinLightsPwmUs);
     }
   }
 
@@ -112,7 +148,40 @@ bool LightsBluerovInterface::cleanup()
   return true;
 }
 
-bool LightsBluerovInterface::write(double pwm_us)
+bool LightsBluerovInterface::read(
+  const std::unordered_map<std::string, double> & commands,
+  std::unordered_map<std::string, double> & states)
+{
+  const auto command_it = commands.find("pwm_us");
+  const double command = command_it == commands.end() ? kMinLightsPwmUs : command_it->second;
+
+  const auto state_it = states.find("pwm_us");
+
+  if (state_it != states.end()) {
+    state_it->second = clamp_lights_pwm(command);
+  }
+
+  return true;
+}
+
+bool LightsBluerovInterface::write(
+  const std::unordered_map<std::string, double> & commands,
+  std::unordered_map<std::string, double> & states)
+{
+  const auto command_it = commands.find("pwm_us");
+  const double command = command_it == commands.end() ? kMinLightsPwmUs : command_it->second;
+  const double clamped_pwm_us = clamp_lights_pwm(command);
+
+  const auto state_it = states.find("pwm_us");
+
+  if (state_it != states.end()) {
+    state_it->second = clamped_pwm_us;
+  }
+
+  return write_command(clamped_pwm_us);
+}
+
+bool LightsBluerovInterface::write_command(double pwm_us)
 {
   if (!initialized_ || !active_) {
     return false;
@@ -142,3 +211,7 @@ bool LightsBluerovInterface::write_pwm_us(double pwm_us)
 }
 
 }  // namespace sura_hardware_interface
+
+PLUGINLIB_EXPORT_CLASS(
+  sura_hardware_interface::LightsBluerovInterface,
+  sura_hardware_interface::ActuatorInterfaceBase)

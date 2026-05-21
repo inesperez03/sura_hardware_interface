@@ -25,4 +25,76 @@
       Hardware interface for actuators
     </description>
   </class>
+
+  <class
+    name="sura_hardware_interface/LightInterface"
+    type="sura_hardware_interface::LightInterface"
+    base_class_type="sura_hardware_interface::ActuatorInterfaceBase">
+    <description>
+      Actuator interface for a binary status light
+    </description>
+  </class>
+
+  <class
+    name="sura_hardware_interface/LightsBluerovInterface"
+    type="sura_hardware_interface::LightsBluerovInterface"
+    base_class_type="sura_hardware_interface::ActuatorInterfaceBase">
+    <description>
+      Actuator interface for BlueROV lights
+    </description>
+  </class>
+
+  <class
+    name="sura_hardware_interface/ImuInterface"
+    type="sura_hardware_interface::ImuInterface"
+    base_class_type="sura_hardware_interface::SensorInterfaceBase">
+    <description>
+      Sensor interface for IMU readings
+    </description>
+  </class>
+
+  <class
+    name="sura_hardware_interface/MagnetometerInterface"
+    type="sura_hardware_interface::MagnetometerInterface"
+    base_class_type="sura_hardware_interface::SensorInterfaceBase">
+    <description>
+      Sensor interface for magnetometer readings
+    </description>
+  </class>
+
+  <class
+    name="sura_hardware_interface/PressureInterface"
+    type="sura_hardware_interface::PressureInterface"
+    base_class_type="sura_hardware_interface::SensorInterfaceBase">
+    <description>
+      Sensor interface for pressure readings
+    </description>
+  </class>
+
+  <class
+    name="sura_hardware_interface/BatteryInterface"
+    type="sura_hardware_interface::BatteryInterface"
+    base_class_type="sura_hardware_interface::SensorInterfaceBase">
+    <description>
+      Sensor interface for battery readings
+    </description>
+  </class>
+
+  <class
+    name="sura_hardware_interface/LeakInterface"
+    type="sura_hardware_interface::LeakInterface"
+    base_class_type="sura_hardware_interface::SensorInterfaceBase">
+    <description>
+      Sensor interface for leak readings
+    </description>
+  </class>
+
+  <class
+    name="sura_hardware_interface/DvlInterface"
+    type="sura_hardware_interface::DvlInterface"
+    base_class_type="sura_hardware_interface::SensorInterfaceBase">
+    <description>
+      Sensor interface for DVL readings
+    </description>
+  </class>
 </library>

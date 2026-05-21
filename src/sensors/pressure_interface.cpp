@@ -1,5 +1,12 @@
 #include "sura_hardware_interface/sensors/pressure_interface.hpp"
 
+#include <exception>
+#include <iostream>
+#include <string>
+#include <unordered_map>
+
+#include "pluginlib/class_list_macros.hpp"
+
 #ifdef TARGET_RASPBERRY
 
 #include <fcntl.h>
@@ -9,19 +16,73 @@
 
 #include <chrono>
 #include <cstdint>
-#include <cstring>
-#include <string>
 #include <thread>
 
 #endif
 
+#include "sensor_msgs/msg/fluid_pressure.hpp"
+
 namespace sura_hardware_interface
 {
 
-#ifdef TARGET_RASPBERRY
-
 namespace
 {
+
+std::string get_param_or(
+  const hardware_interface::ComponentInfo & sensor_info,
+  const std::string & name,
+  const std::string & default_value)
+{
+  const auto it = sensor_info.parameters.find(name);
+
+  if (it == sensor_info.parameters.end()) {
+    return default_value;
+  }
+
+  return it->second;
+}
+
+double get_double_param_or(
+  const hardware_interface::ComponentInfo & sensor_info,
+  const std::string & name,
+  const double default_value)
+{
+  const auto it = sensor_info.parameters.find(name);
+
+  if (it == sensor_info.parameters.end()) {
+    return default_value;
+  }
+
+  return std::stod(it->second);
+}
+
+int get_int_param_or(
+  const hardware_interface::ComponentInfo & sensor_info,
+  const std::string & name,
+  const int default_value)
+{
+  const auto it = sensor_info.parameters.find(name);
+
+  if (it == sensor_info.parameters.end()) {
+    return default_value;
+  }
+
+  return std::stoi(it->second);
+}
+
+void set_state_if_exists(
+  std::unordered_map<std::string, double> & states,
+  const std::string & name,
+  const double value)
+{
+  const auto it = states.find(name);
+
+  if (it != states.end()) {
+    it->second = value;
+  }
+}
+
+#ifdef TARGET_RASPBERRY
 
 class MS5837Local
 {
@@ -45,12 +106,14 @@ public:
     }
 
     if (!write_byte(0x1E)) {
+      close();
       return false;
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
     if (!read_prom()) {
+      close();
       return false;
     }
 
@@ -60,6 +123,14 @@ public:
     conversion(0x58, dummy_d2);
 
     return true;
+  }
+
+  void close()
+  {
+    if (fd_ >= 0) {
+      ::close(fd_);
+      fd_ = -1;
+    }
   }
 
   bool read()
@@ -210,49 +281,178 @@ private:
   double temperature_c_{0.0};
 };
 
-static MS5837Local sensor;
-static bool initialized = false;
-static double last_pressure_mbar = 1013.25;
-static bool has_last_pressure = false;
+#endif
 
 }  // namespace
 
-#endif
-
-bool PressureInterface::read(double & pressure)
+bool PressureInterface::initialize(
+  const hardware_interface::ComponentInfo & sensor_info,
+  const hardware_interface::HardwareInfo &,
+  const std::string & environment,
+  const rclcpp::Node::SharedPtr & sim_node)
 {
-#ifdef TARGET_RASPBERRY
-  if (!initialized) {
-    if (!sensor.init(6, 0x76)) {
-      if (has_last_pressure) {
-        pressure = last_pressure_mbar;
-        return true;
-      }
-
-      return false;
-    }
-
-    initialized = true;
+  if (initialized_) {
+    return true;
   }
 
-  if (!sensor.read()) {
-    if (has_last_pressure) {
-      pressure = last_pressure_mbar;
-      return true;
-    }
+  sensor_name_ = sensor_info.name;
+  environment_ = environment;
+  sim_node_ = sim_node;
 
+  if (environment_ != "real" && environment_ != "sim") {
+    std::cerr << "[Pressure] Unsupported environment: "
+              << environment_ << std::endl;
     return false;
   }
 
-  pressure = sensor.pressure_mbar();
-  last_pressure_mbar = pressure;
-  has_last_pressure = true;
+  try {
+    read_rate_hz_ = get_double_param_or(
+      sensor_info,
+      "read_rate_hz",
+      read_rate_hz_);
 
-#else
-  pressure = 0.0;
+    pressure_offset_pa_ = get_double_param_or(
+      sensor_info,
+      "pressure_offset_pa",
+      pressure_offset_pa_);
+
+    i2c_bus_ = get_int_param_or(
+      sensor_info,
+      "i2c_bus",
+      i2c_bus_);
+
+    i2c_address_ = static_cast<uint8_t>(
+      get_int_param_or(sensor_info, "i2c_address", i2c_address_));
+
+    stonefish_topic_ = get_param_or(
+      sensor_info,
+      "stonefish_topic",
+      stonefish_topic_);
+  } catch (const std::exception & e) {
+    std::cerr << "[Pressure] Error parsing parameters for sensor '"
+              << sensor_name_ << "': " << e.what() << std::endl;
+    return false;
+  }
+
+#ifdef TARGET_RASPBERRY
+  if (environment_ == "real") {
+    pressure_sensor_ = std::make_unique<MS5837Local>();
+
+    if (!pressure_sensor_->init(i2c_bus_, i2c_address_)) {
+      std::cerr << "[Pressure] Failed to initialize MS5837 on I2C bus "
+                << i2c_bus_ << " address 0x"
+                << std::hex << static_cast<int>(i2c_address_)
+                << std::dec << std::endl;
+      pressure_sensor_.reset();
+      return false;
+    }
+  }
 #endif
+
+  if (environment_ == "sim") {
+    if (!sim_node_) {
+      std::cerr << "[Pressure] sim_node is null in simulation mode"
+                << std::endl;
+      return false;
+    }
+
+    if (stonefish_topic_.empty()) {
+      std::cerr << "[Pressure] Missing parameter 'stonefish_topic' in sim mode"
+                << std::endl;
+      return false;
+    }
+
+    pressure_sub_ =
+      sim_node_->create_subscription<sensor_msgs::msg::FluidPressure>(
+      stonefish_topic_,
+      rclcpp::SensorDataQoS(),
+      [this](const sensor_msgs::msg::FluidPressure::SharedPtr msg)
+      {
+        last_pressure_pa_ = msg->fluid_pressure;
+        has_last_pressure_ = true;
+      });
+  }
+
+  initialized_ = true;
+  active_ = false;
+
+  return true;
+}
+
+bool PressureInterface::activate()
+{
+  if (!initialized_) {
+    return false;
+  }
+
+  active_ = true;
+  return true;
+}
+
+bool PressureInterface::deactivate()
+{
+  active_ = false;
+  return true;
+}
+
+bool PressureInterface::cleanup()
+{
+  active_ = false;
+  initialized_ = false;
+
+#ifdef TARGET_RASPBERRY
+  if (pressure_sensor_) {
+    pressure_sensor_->close();
+    pressure_sensor_.reset();
+  }
+#endif
+
+  pressure_sub_.reset();
+  sim_node_.reset();
+
+  last_pressure_pa_ = pressure_offset_pa_;
+  has_last_pressure_ = false;
+
+  return true;
+}
+
+bool PressureInterface::read(std::unordered_map<std::string, double> & states)
+{
+  if (!initialized_ || !active_) {
+    return false;
+  }
+
+  double pressure_pa = pressure_offset_pa_;
+
+  if (environment_ == "real") {
+#ifdef TARGET_RASPBERRY
+    if (pressure_sensor_ && pressure_sensor_->read()) {
+      pressure_pa = pressure_sensor_->pressure_pa();
+      last_pressure_pa_ = pressure_pa;
+      has_last_pressure_ = true;
+    } else if (has_last_pressure_) {
+      pressure_pa = last_pressure_pa_;
+    } else {
+      return false;
+    }
+#else
+    pressure_pa = pressure_offset_pa_;
+#endif
+  } else {
+    if (has_last_pressure_) {
+      pressure_pa = last_pressure_pa_;
+    } else {
+      pressure_pa = pressure_offset_pa_;
+    }
+  }
+
+  set_state_if_exists(states, "fluid_pressure", pressure_pa);
 
   return true;
 }
 
 }  // namespace sura_hardware_interface
+
+PLUGINLIB_EXPORT_CLASS(
+  sura_hardware_interface::PressureInterface,
+  sura_hardware_interface::SensorInterfaceBase)

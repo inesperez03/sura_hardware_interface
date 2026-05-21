@@ -60,7 +60,7 @@ private:
 
   std::string environment_;
   std::string lookup_csv_path_;
-  std::string stonefish_topic_{"/catamaran/controller/thruster_setpoints_sim"};
+  std::string stonefish_topic_;
 
   bool is_active_{false};
 

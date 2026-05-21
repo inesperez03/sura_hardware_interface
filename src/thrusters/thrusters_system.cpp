@@ -7,9 +7,11 @@
 #include <cstdlib>
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <limits>
 #include <stdexcept>
 
+#include "ament_index_cpp/get_package_share_directory.hpp"
 #include "pluginlib/class_list_macros.hpp"
 
 namespace sura_hardware_interface
@@ -32,23 +34,6 @@ static uint16_t pulse_us_to_counts(double pulse_us, double freq_hz)
 }
 #endif
 
-std::vector<int> parse_pwm_channels(const std::string & channels)
-{
-  std::vector<int> parsed_channels;
-  std::stringstream stream(channels);
-  std::string token;
-
-  while (std::getline(stream, token, ',')) {
-    if (token.empty()) {
-      continue;
-    }
-
-    parsed_channels.push_back(std::stoi(token));
-  }
-
-  return parsed_channels;
-}
-
 bool parse_bool_parameter(const std::string & value)
 {
   if (value == "true" || value == "True" || value == "TRUE" || value == "1") {
@@ -70,6 +55,63 @@ double parse_double_parameter(const std::string & value)
     throw std::invalid_argument("Trailing characters in double value: " + value);
   }
   return parsed;
+}
+
+int parse_int_parameter(const std::string & value)
+{
+  std::size_t processed = 0;
+  const int parsed = std::stoi(value, &processed);
+  if (processed != value.size()) {
+    throw std::invalid_argument("Trailing characters in integer value: " + value);
+  }
+  return parsed;
+}
+
+std::string required_joint_parameter(
+  const hardware_interface::ComponentInfo & joint,
+  const std::string & parameter_name)
+{
+  const auto parameter_it = joint.parameters.find(parameter_name);
+  if (parameter_it == joint.parameters.end()) {
+    throw std::runtime_error(
+      "Joint '" + joint.name + "' is missing required parameter '" + parameter_name + "'");
+  }
+
+  return parameter_it->second;
+}
+
+std::string optional_joint_parameter(
+  const hardware_interface::ComponentInfo & joint,
+  const std::string & parameter_name)
+{
+  const auto parameter_it = joint.parameters.find(parameter_name);
+  if (parameter_it == joint.parameters.end()) {
+    return "";
+  }
+
+  return parameter_it->second;
+}
+
+std::string resolve_lookup_csv_path(const std::string & lookup_csv_path)
+{
+  const std::filesystem::path path{lookup_csv_path};
+
+  if (path.is_absolute() || std::filesystem::exists(path)) {
+    return lookup_csv_path;
+  }
+
+  try {
+    const auto package_share =
+      ament_index_cpp::get_package_share_directory("sura_hardware_interface");
+    const auto package_path = std::filesystem::path(package_share) / path;
+
+    if (std::filesystem::exists(package_path)) {
+      return package_path.string();
+    }
+  } catch (const std::exception &) {
+  }
+
+  return lookup_csv_path;
 }
 
 }  // namespace
@@ -116,18 +158,12 @@ hardware_interface::CallbackReturn ThrustersSystem::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
-  try {
-    environment_ = info_.hardware_parameters.at("environment");
-    lookup_csv_path_ = info_.hardware_parameters.at("lookup_csv");
-  } catch (const std::out_of_range & e) {
-    RCLCPP_ERROR(kLogger, "Missing hardware parameter: %s", e.what());
+  const auto environment_it = info_.hardware_parameters.find("environment");
+  if (environment_it == info_.hardware_parameters.end()) {
+    RCLCPP_ERROR(kLogger, "Missing hardware parameter: environment");
     return hardware_interface::CallbackReturn::ERROR;
   }
-
-  const auto stonefish_topic_it = info_.hardware_parameters.find("stonefish_topic");
-  if (stonefish_topic_it != info_.hardware_parameters.end()) {
-    stonefish_topic_ = stonefish_topic_it->second;
-  }
+  environment_ = environment_it->second;
 
   if (info_.joints.empty()) {
     RCLCPP_ERROR(kLogger, "Expected at least one thruster joint");
@@ -160,45 +196,81 @@ hardware_interface::CallbackReturn ThrustersSystem::on_init(
     info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
   reset_thruster_filter();
   inverted_flags_.assign(info_.joints.size(), false);
+  pwm_channel_indices_.clear();
+  pwm_channel_indices_.reserve(info_.joints.size());
+  lookup_csv_path_.clear();
+  stonefish_topic_.clear();
 
   for (std::size_t index = 0; index < info_.joints.size(); ++index) {
     const auto & joint = info_.joints[index];
-    const auto inverted_it = joint.parameters.find("inverted");
 
-    if (inverted_it != joint.parameters.end()) {
-      try {
-        inverted_flags_[index] = parse_bool_parameter(inverted_it->second);
-      } catch (const std::exception & e) {
+    try {
+      const std::string joint_lookup_csv = required_joint_parameter(joint, "lookup_csv");
+
+      if (lookup_csv_path_.empty()) {
+        lookup_csv_path_ = joint_lookup_csv;
+      } else if (lookup_csv_path_ != joint_lookup_csv) {
         RCLCPP_ERROR(
           kLogger,
-          "Invalid 'inverted' parameter for joint %s: %s",
+          "All thruster joints must use the same lookup_csv. Joint %s uses '%s', expected '%s'",
           joint.name.c_str(),
-          e.what());
+          joint_lookup_csv.c_str(),
+          lookup_csv_path_.c_str());
         return hardware_interface::CallbackReturn::ERROR;
       }
+
+      if (environment_ == "sim") {
+        const std::string joint_stonefish_topic =
+          required_joint_parameter(joint, "stonefish_topic");
+
+        if (stonefish_topic_.empty()) {
+          stonefish_topic_ = joint_stonefish_topic;
+        } else if (stonefish_topic_ != joint_stonefish_topic) {
+          RCLCPP_ERROR(
+            kLogger,
+            "All thruster joints must use the same stonefish_topic. Joint %s uses '%s', expected "
+            "'%s'",
+            joint.name.c_str(),
+            joint_stonefish_topic.c_str(),
+            stonefish_topic_.c_str());
+          return hardware_interface::CallbackReturn::ERROR;
+        }
+      }
+
+      if (environment_ == "real") {
+        inverted_flags_[index] = parse_bool_parameter(required_joint_parameter(joint, "inverted"));
+        pwm_channel_indices_.push_back(
+          parse_int_parameter(required_joint_parameter(joint, "channel")));
+      } else {
+        const std::string inverted_value = optional_joint_parameter(joint, "inverted");
+        if (!inverted_value.empty()) {
+          inverted_flags_[index] = parse_bool_parameter(inverted_value);
+        }
+      }
+    } catch (const std::exception & e) {
+      RCLCPP_ERROR(kLogger, "%s", e.what());
+      return hardware_interface::CallbackReturn::ERROR;
     }
 
-    RCLCPP_INFO(
-      kLogger,
-      "Joint %s inverted=%s",
-      joint.name.c_str(),
-      inverted_flags_[index] ? "true" : "false");
+    if (environment_ == "real") {
+      RCLCPP_INFO(
+        kLogger,
+        "Joint %s channel=%d inverted=%s",
+        joint.name.c_str(),
+        pwm_channel_indices_[index],
+        inverted_flags_[index] ? "true" : "false");
+    } else {
+      RCLCPP_INFO(
+        kLogger,
+        "Joint %s inverted=%s",
+        joint.name.c_str(),
+        inverted_flags_[index] ? "true" : "false");
+    }
   }
 
   is_active_ = false;
   navigator_initialized_ = false;
   pwm_enabled_ = false;
-  pwm_channel_indices_.clear();
-
-  const auto pwm_channels_it = info_.hardware_parameters.find("pwm_channels");
-  if (pwm_channels_it != info_.hardware_parameters.end()) {
-    try {
-      pwm_channel_indices_ = parse_pwm_channels(pwm_channels_it->second);
-    } catch (const std::exception & e) {
-      RCLCPP_ERROR(kLogger, "Failed to parse pwm_channels: %s", e.what());
-      return hardware_interface::CallbackReturn::ERROR;
-    }
-  }
 
   thruster_lpf_alpha_ = 1.0;
   if (const char * alpha_env = std::getenv(kThrusterLpfAlphaEnv); alpha_env != nullptr) {
@@ -220,25 +292,19 @@ hardware_interface::CallbackReturn ThrustersSystem::on_init(
       kThrusterLpfAlphaEnv);
   }
 
-  if (environment_ == "real" && !pwm_channel_indices_.empty() &&
-      pwm_channel_indices_.size() != info_.joints.size())
-  {
-    RCLCPP_ERROR(
-      kLogger,
-      "pwm_channels must contain one channel per joint. Expected %zu, got %zu",
-      info_.joints.size(),
-      pwm_channel_indices_.size());
-    return hardware_interface::CallbackReturn::ERROR;
-  }
-
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn ThrustersSystem::on_configure(
   const rclcpp_lifecycle::State & /*previous_state*/)
 {
-  if (!mapper_.loadCsv(lookup_csv_path_)) {
-    RCLCPP_ERROR(kLogger, "Failed to load thruster lookup CSV: %s", lookup_csv_path_.c_str());
+  const std::string resolved_lookup_csv_path = resolve_lookup_csv_path(lookup_csv_path_);
+
+  if (!mapper_.loadCsv(resolved_lookup_csv_path)) {
+    RCLCPP_ERROR(
+      kLogger,
+      "Failed to load thruster lookup CSV: %s",
+      resolved_lookup_csv_path.c_str());
     return hardware_interface::CallbackReturn::ERROR;
   }
 
@@ -263,7 +329,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_configure(
   } else if (environment_ == "real") {
 #ifdef TARGET_RASPBERRY
     if (pwm_channel_indices_.empty()) {
-      RCLCPP_ERROR(kLogger, "Real environment requires pwm_channels hardware parameter");
+      RCLCPP_ERROR(kLogger, "Real environment requires one channel parameter per thruster joint");
       return hardware_interface::CallbackReturn::ERROR;
     }
 

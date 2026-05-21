@@ -1,26 +1,37 @@
 #pragma once
 
 #include <string>
+#include <unordered_map>
 
 #include <hardware_interface/hardware_info.hpp>
+
+#include "sura_hardware_interface/actuators/actuator_interface_base.hpp"
 
 namespace sura_hardware_interface
 {
 
-class LightInterface
+class LightInterface : public ActuatorInterfaceBase
 {
 public:
   bool initialize(
-    const hardware_interface::HardwareInfo & info,
-    const char * environment,
-    int status_light_channel);
-  bool activate();
-  bool deactivate();
-  bool cleanup();
+    const hardware_interface::ComponentInfo & actuator_info,
+    const hardware_interface::HardwareInfo & hardware_info,
+    const std::string & environment) override;
+  bool activate() override;
+  bool deactivate() override;
+  bool cleanup() override;
 
-  bool write(bool enabled);
+  bool read(
+    const std::unordered_map<std::string, double> & commands,
+    std::unordered_map<std::string, double> & states) override;
+
+  bool write(
+    const std::unordered_map<std::string, double> & commands,
+    std::unordered_map<std::string, double> & states) override;
 
 private:
+  bool write_enabled(bool enabled);
+
   std::string environment_{"real"};
   int status_light_channel_{1};
   bool initialized_{false};

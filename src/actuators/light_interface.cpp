@@ -4,23 +4,71 @@
 #include "bindings.h"
 #endif
 
+#include <cmath>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "pluginlib/class_list_macros.hpp"
 
 namespace sura_hardware_interface
 {
 
+namespace
+{
+
+bool has_single_interface(
+  const std::vector<hardware_interface::InterfaceInfo> & interfaces,
+  const std::string & name)
+{
+  return interfaces.size() == 1 && interfaces[0].name == name;
+}
+
+int required_channel(const hardware_interface::ComponentInfo & actuator_info)
+{
+  const auto it = actuator_info.parameters.find("channel");
+
+  if (it == actuator_info.parameters.end()) {
+    throw std::runtime_error(
+      "Actuator joint '" + actuator_info.name + "' is missing required parameter 'channel'");
+  }
+
+  return std::stoi(it->second);
+}
+
+bool command_enabled(const std::unordered_map<std::string, double> & commands)
+{
+  const auto it = commands.find("enabled");
+  return it != commands.end() && std::isfinite(it->second) && it->second >= 0.5;
+}
+
+}  // namespace
+
 bool LightInterface::initialize(
+  const hardware_interface::ComponentInfo & actuator_info,
   const hardware_interface::HardwareInfo &,
-  const char * environment,
-  int status_light_channel)
+  const std::string & environment)
 {
   if (initialized_) {
     return true;
   }
 
+  if (
+    !has_single_interface(actuator_info.command_interfaces, "enabled") ||
+    !has_single_interface(actuator_info.state_interfaces, "enabled"))
+  {
+    return false;
+  }
+
   environment_ = environment;
-  status_light_channel_ = status_light_channel;
+
+  try {
+    status_light_channel_ = required_channel(actuator_info);
+  } catch (const std::exception &) {
+    return false;
+  }
 
   if (environment_ == "real") {
 #ifdef TARGET_RASPBERRY
@@ -55,7 +103,7 @@ bool LightInterface::activate()
   }
 
   active_ = true;
-  return write(true);
+  return write_enabled(true);
 }
 
 bool LightInterface::deactivate()
@@ -73,7 +121,29 @@ bool LightInterface::cleanup()
   return true;
 }
 
-bool LightInterface::write(bool enabled)
+bool LightInterface::read(
+  const std::unordered_map<std::string, double> & commands,
+  std::unordered_map<std::string, double> & states)
+{
+  const auto it = states.find("enabled");
+
+  if (it != states.end()) {
+    it->second = command_enabled(commands) ? 1.0 : 0.0;
+  }
+
+  return true;
+}
+
+bool LightInterface::write(
+  const std::unordered_map<std::string, double> & commands,
+  std::unordered_map<std::string, double> & states)
+{
+  const bool enabled = command_enabled(commands);
+  read(commands, states);
+  return write_enabled(enabled);
+}
+
+bool LightInterface::write_enabled(bool enabled)
 {
   if (!initialized_ || !active_) {
     return false;
@@ -101,3 +171,7 @@ bool LightInterface::write(bool enabled)
 }
 
 }  // namespace sura_hardware_interface
+
+PLUGINLIB_EXPORT_CLASS(
+  sura_hardware_interface::LightInterface,
+  sura_hardware_interface::ActuatorInterfaceBase)

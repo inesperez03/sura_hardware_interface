@@ -1,17 +1,20 @@
 #pragma once
 
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
+#include "hardware_interface/handle.hpp"
 #include "hardware_interface/hardware_info.hpp"
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
+#include "pluginlib/class_loader.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/macros.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 
-#include "sura_hardware_interface/actuators/light_interface.hpp"
-#include "sura_hardware_interface/actuators/lights_bluerov_interface.hpp"
+#include "sura_hardware_interface/actuators/actuator_interface_base.hpp"
 
 namespace sura_hardware_interface
 {
@@ -20,6 +23,8 @@ class ActuatorsSystem : public hardware_interface::SystemInterface
 {
 public:
   RCLCPP_SHARED_PTR_DEFINITIONS(ActuatorsSystem)
+
+  ActuatorsSystem();
 
   hardware_interface::CallbackReturn on_init(
     const hardware_interface::HardwareInfo & info) override;
@@ -54,26 +59,33 @@ public:
     const rclcpp::Duration & period) override;
 
 private:
-  hardware_interface::return_type write_status_light(bool enabled);
-  hardware_interface::return_type write_bluerov_lights(double pwm_us);
+  struct ActuatorInstance
+  {
+    hardware_interface::ComponentInfo info;
+    pluginlib::UniquePtr<ActuatorInterfaceBase> interface;
+
+    std::unordered_map<std::string, double> command_states;
+    std::unordered_map<std::string, double> read_states;
+  };
+
+  void reset_states();
+
+  static std::string parameter_or(
+    const std::unordered_map<std::string, std::string> & parameters,
+    const std::string & name,
+    const std::string & default_value);
+
+  static bool has_parameter(
+    const hardware_interface::ComponentInfo & component,
+    const std::string & name);
 
   std::string environment_{"real"};
+  bool is_configured_{false};
   bool is_active_{false};
 
-  bool has_status_light_{false};
-  bool has_bluerov_lights_{false};
-  std::string status_light_joint_name_;
-  std::string bluerov_lights_joint_name_;
+  std::vector<std::unique_ptr<ActuatorInstance>> actuators_;
 
-  int status_light_channel_{1};
-  double status_light_command_{1.0};
-  double status_light_state_{1.0};
-  LightInterface status_light_;
-
-  int bluerov_lights_channel_{11};
-  double bluerov_lights_command_{1100.0};
-  double bluerov_lights_state_{1100.0};
-  LightsBluerovInterface bluerov_lights_;
+  pluginlib::ClassLoader<ActuatorInterfaceBase> actuator_interface_loader_;
 };
 
 }  // namespace sura_hardware_interface
