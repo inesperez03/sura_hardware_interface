@@ -10,7 +10,7 @@
 namespace sura_hardware_interface
 {
 
-class LightInterface : public ActuatorInterfaceBase
+class LightBlueboatInterface : public ActuatorInterfaceBase
 {
 public:
   bool initialize(

@@ -73,6 +73,7 @@ private:
 
   // Per-joint flag: if true, mirror PWM around 1500 us in real hardware mode.
   std::vector<bool> inverted_flags_;
+  std::vector<double> pwm_offsets_us_;
 
   ThrusterMapper mapper_;
 

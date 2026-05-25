@@ -129,12 +129,19 @@ void ThrustersSystem::publish_zero_command()
     thruster_stonefish_pub_->publish(msg);
   } else if (environment_ == "real" && navigator_initialized_ && pwm_enabled_) {
 #ifdef TARGET_RASPBERRY
-    const double neutral_pulse_us = mapper_.forceToPwm(0.0);
-    const uint16_t neutral_counts = pulse_us_to_counts(neutral_pulse_us, pwm_frequency_hz_);
-
     try {
-      for (const int channel_index : pwm_channel_indices_) {
-        set_pwm_channel_value(static_cast<uintptr_t>(channel_index), neutral_counts);
+      for (std::size_t index = 0; index < pwm_channel_indices_.size(); ++index) {
+        double neutral_pulse_us = mapper_.forceToPwm(0.0);
+        if (index < inverted_flags_.size() && inverted_flags_[index]) {
+          neutral_pulse_us = 3000.0 - neutral_pulse_us;
+        }
+        if (index < pwm_offsets_us_.size()) {
+          neutral_pulse_us += pwm_offsets_us_[index];
+        }
+
+        set_pwm_channel_value(
+          static_cast<uintptr_t>(pwm_channel_indices_[index]),
+          pulse_us_to_counts(neutral_pulse_us, pwm_frequency_hz_));
       }
     } catch (const std::exception & e) {
       RCLCPP_ERROR(kLogger, "Failed to send neutral PWM command: %s", e.what());
@@ -196,6 +203,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_init(
     info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
   reset_thruster_filter();
   inverted_flags_.assign(info_.joints.size(), false);
+  pwm_offsets_us_.assign(info_.joints.size(), 0.0);
   pwm_channel_indices_.clear();
   pwm_channel_indices_.reserve(info_.joints.size());
   lookup_csv_path_.clear();
@@ -247,6 +255,11 @@ hardware_interface::CallbackReturn ThrustersSystem::on_init(
           inverted_flags_[index] = parse_bool_parameter(inverted_value);
         }
       }
+
+      const std::string pwm_offset_value = optional_joint_parameter(joint, "pwm_offset");
+      if (!pwm_offset_value.empty()) {
+        pwm_offsets_us_[index] = parse_double_parameter(pwm_offset_value);
+      }
     } catch (const std::exception & e) {
       RCLCPP_ERROR(kLogger, "%s", e.what());
       return hardware_interface::CallbackReturn::ERROR;
@@ -255,16 +268,18 @@ hardware_interface::CallbackReturn ThrustersSystem::on_init(
     if (environment_ == "real") {
       RCLCPP_INFO(
         kLogger,
-        "Joint %s channel=%d inverted=%s",
+        "Joint %s channel=%d inverted=%s pwm_offset=%.3f us",
         joint.name.c_str(),
         pwm_channel_indices_[index],
-        inverted_flags_[index] ? "true" : "false");
+        inverted_flags_[index] ? "true" : "false",
+        pwm_offsets_us_[index]);
     } else {
       RCLCPP_INFO(
         kLogger,
-        "Joint %s inverted=%s",
+        "Joint %s inverted=%s pwm_offset=%.3f us",
         joint.name.c_str(),
-        inverted_flags_[index] ? "true" : "false");
+        inverted_flags_[index] ? "true" : "false",
+        pwm_offsets_us_[index]);
     }
   }
 
@@ -344,11 +359,18 @@ hardware_interface::CallbackReturn ThrustersSystem::on_configure(
       set_pwm_enable(true);
       pwm_enabled_ = true;
 
-      const double neutral_pulse_us = mapper_.forceToPwm(0.0);
-      const uint16_t neutral_counts = pulse_us_to_counts(neutral_pulse_us, pwm_frequency_hz_);
+      for (std::size_t index = 0; index < pwm_channel_indices_.size(); ++index) {
+        double neutral_pulse_us = mapper_.forceToPwm(0.0);
+        if (index < inverted_flags_.size() && inverted_flags_[index]) {
+          neutral_pulse_us = 3000.0 - neutral_pulse_us;
+        }
+        if (index < pwm_offsets_us_.size()) {
+          neutral_pulse_us += pwm_offsets_us_[index];
+        }
 
-      for (const int channel_index : pwm_channel_indices_) {
-        set_pwm_channel_value(static_cast<uintptr_t>(channel_index), neutral_counts);
+        set_pwm_channel_value(
+          static_cast<uintptr_t>(pwm_channel_indices_[index]),
+          pulse_us_to_counts(neutral_pulse_us, pwm_frequency_hz_));
       }
 
       RCLCPP_INFO(kLogger, "Navigator initialized successfully");
@@ -629,6 +651,8 @@ hardware_interface::return_type ThrustersSystem::write(
     if (environment_ == "real" && inverted_flags_[index]) {
       pulse_us = 3000.0 - pulse_us;
     }
+
+    pulse_us += pwm_offsets_us_[index];
 
     pwm_counts[index] = pulse_us_to_counts(pulse_us, pwm_frequency_hz_);
 #endif

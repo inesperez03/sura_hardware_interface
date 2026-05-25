@@ -1,4 +1,4 @@
-#include "sura_hardware_interface/actuators/light_interface.hpp"
+#include "sura_hardware_interface/actuators/light_blueboat_interface.hpp"
 
 #ifdef TARGET_RASPBERRY
 #include "bindings.h"
@@ -46,7 +46,7 @@ bool command_enabled(const std::unordered_map<std::string, double> & commands)
 
 }  // namespace
 
-bool LightInterface::initialize(
+bool LightBlueboatInterface::initialize(
   const hardware_interface::ComponentInfo & actuator_info,
   const hardware_interface::HardwareInfo &,
   const std::string & environment)
@@ -96,7 +96,7 @@ bool LightInterface::initialize(
   return true;
 }
 
-bool LightInterface::activate()
+bool LightBlueboatInterface::activate()
 {
   if (!initialized_) {
     return false;
@@ -106,13 +106,13 @@ bool LightInterface::activate()
   return write_enabled(true);
 }
 
-bool LightInterface::deactivate()
+bool LightBlueboatInterface::deactivate()
 {
   active_ = false;
   return true;
 }
 
-bool LightInterface::cleanup()
+bool LightBlueboatInterface::cleanup()
 {
   active_ = false;
   initialized_ = false;
@@ -121,7 +121,7 @@ bool LightInterface::cleanup()
   return true;
 }
 
-bool LightInterface::read(
+bool LightBlueboatInterface::read(
   const std::unordered_map<std::string, double> & commands,
   std::unordered_map<std::string, double> & states)
 {
@@ -134,7 +134,7 @@ bool LightInterface::read(
   return true;
 }
 
-bool LightInterface::write(
+bool LightBlueboatInterface::write(
   const std::unordered_map<std::string, double> & commands,
   std::unordered_map<std::string, double> & states)
 {
@@ -143,7 +143,7 @@ bool LightInterface::write(
   return write_enabled(enabled);
 }
 
-bool LightInterface::write_enabled(bool enabled)
+bool LightBlueboatInterface::write_enabled(bool enabled)
 {
   if (!initialized_ || !active_) {
     return false;
@@ -173,5 +173,5 @@ bool LightInterface::write_enabled(bool enabled)
 }  // namespace sura_hardware_interface
 
 PLUGINLIB_EXPORT_CLASS(
-  sura_hardware_interface::LightInterface,
+  sura_hardware_interface::LightBlueboatInterface,
   sura_hardware_interface::ActuatorInterfaceBase)

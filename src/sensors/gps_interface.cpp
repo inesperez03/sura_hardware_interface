@@ -18,6 +18,8 @@
 
 #include <rclcpp/rclcpp.hpp>
 
+#include "pluginlib/class_list_macros.hpp"
+
 namespace sura_hardware_interface
 {
 
@@ -616,3 +618,7 @@ bool GpsInterface::parse_nav_pvt(
 }
 
 }  // namespace sura_hardware_interface
+
+PLUGINLIB_EXPORT_CLASS(
+  sura_hardware_interface::GpsInterface,
+  sura_hardware_interface::SensorInterfaceBase)

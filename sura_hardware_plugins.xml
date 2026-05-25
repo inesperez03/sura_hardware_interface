@@ -27,11 +27,11 @@
   </class>
 
   <class
-    name="sura_hardware_interface/LightInterface"
-    type="sura_hardware_interface::LightInterface"
+    name="sura_hardware_interface/LightBlueboatInterface"
+    type="sura_hardware_interface::LightBlueboatInterface"
     base_class_type="sura_hardware_interface::ActuatorInterfaceBase">
     <description>
-      Actuator interface for a binary status light
+      Actuator interface for a BlueBoat binary status light
     </description>
   </class>
 
@@ -90,11 +90,29 @@
   </class>
 
   <class
+    name="sura_hardware_interface/AltimeterBlueboatInterface"
+    type="sura_hardware_interface::AltimeterBlueboatInterface"
+    base_class_type="sura_hardware_interface::SensorInterfaceBase">
+    <description>
+      Sensor interface for the BlueBoat serial altimeter
+    </description>
+  </class>
+
+  <class
     name="sura_hardware_interface/DvlInterface"
     type="sura_hardware_interface::DvlInterface"
     base_class_type="sura_hardware_interface::SensorInterfaceBase">
     <description>
       Sensor interface for DVL readings
+    </description>
+  </class>
+  
+  <class
+    name="sura_hardware_interface/GpsInterface"
+    type="sura_hardware_interface::GpsInterface"
+    base_class_type="sura_hardware_interface::SensorInterfaceBase">
+    <description>
+      Sensor interface for GPS readings
     </description>
   </class>
 </library>
