@@ -318,10 +318,10 @@ bool GpsInterface::read(std::unordered_map<std::string, double> & states)
   last_valid_ = 0.0;
 #endif
 
-  set_state_if_exists(states, "latitude", last_latitude_);
-  set_state_if_exists(states, "longitude", last_longitude_);
-  set_state_if_exists(states, "altitude", last_altitude_);
-  set_state_if_exists(states, "valid", last_valid_);
+  set_state_if_exists(states, "gps.latitude", last_latitude_);
+  set_state_if_exists(states, "gps.longitude", last_longitude_);
+  set_state_if_exists(states, "gps.altitude", last_altitude_);
+  set_state_if_exists(states, "gps.valid", last_valid_);
 
   return true;
 }
