@@ -84,7 +84,6 @@ bool ImuInterface::initialize(
       sensor_info,
       "read_rate_hz",
       read_rate_hz_);
-
     stonefish_topic_ = get_param_or(
       sensor_info,
       "stonefish_topic",

@@ -37,7 +37,6 @@ private:
   std::string environment_{"real"};
 
   double read_rate_hz_{200.0};
-
   rclcpp::Node::SharedPtr sim_node_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
 
