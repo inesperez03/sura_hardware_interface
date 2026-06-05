@@ -22,7 +22,7 @@
 #include "geometry_msgs/msg/twist_stamped.hpp"
 #include "pluginlib/class_list_macros.hpp"
 #include "sensor_msgs/msg/nav_sat_fix.hpp"
-#include "std_msgs/msg/float64.hpp"
+#include "sensor_msgs/msg/range.hpp"
 
 namespace sura_hardware_interface
 {
@@ -209,16 +209,16 @@ bool DvlInterface::initialize(
       });
 
     altitude_sub_ =
-      sim_node_->create_subscription<std_msgs::msg::Float64>(
+      sim_node_->create_subscription<sensor_msgs::msg::Range>(
       stonefish_altitude_topic_,
       rclcpp::SensorDataQoS(),
-      [this](const std_msgs::msg::Float64::SharedPtr msg)
+      [this](const sensor_msgs::msg::Range::SharedPtr msg)
       {
         std::lock_guard<std::mutex> lock(data_mutex_);
 
         last_rx_time_ = std::chrono::steady_clock::now();
 
-        last_distance_z_ = msg->data;
+        last_distance_z_ = msg->range;
         last_distance_z_valid_ = true;
       });
 

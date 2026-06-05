@@ -9,7 +9,7 @@
 #include "hardware_interface/hardware_info.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/nav_sat_fix.hpp"
-#include "std_msgs/msg/float64.hpp"
+#include "sensor_msgs/msg/range.hpp"
 
 #include "sura_hardware_interface/sensors/sensor_interface_base.hpp"
 
@@ -84,7 +84,7 @@ private:
   rclcpp::Node::SharedPtr sim_node_;
 
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr dvl_sub_;
-  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr altitude_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::Range>::SharedPtr altitude_sub_;
   rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_sub_;
 
   std::string stonefish_topic_;

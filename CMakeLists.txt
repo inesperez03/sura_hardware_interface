@@ -24,20 +24,11 @@ if(SURA_SYSTEM_PROCESSOR MATCHES "aarch64|armv7l|armv7|arm")
   set(TARGET_RASPBERRY TRUE)
 endif()
 
-# Stonefish is only needed for desktop/simulation builds.
-option(SURA_ENABLE_STONEFISH "Build Stonefish simulation support" ON)
-
 if(TARGET_RASPBERRY)
-  message(STATUS "Raspberry/ARM detected: disabling stonefish_ros2 dependency")
-  set(SURA_ENABLE_STONEFISH OFF CACHE BOOL "Build Stonefish simulation support" FORCE)
+  message(STATUS "Raspberry/ARM detected")
 endif()
 
-if(SURA_ENABLE_STONEFISH)
-  find_package(stonefish_ros2 REQUIRED)
-  add_compile_definitions(SURA_HAS_STONEFISH=1)
-else()
-  add_compile_definitions(SURA_HAS_STONEFISH=0)
-endif()
+add_compile_definitions(SURA_HAS_STONEFISH=0)
 
 include(ExternalProject)
 
@@ -117,12 +108,6 @@ ament_target_dependencies(${PROJECT_NAME}
   std_msgs
 )
 
-if(SURA_ENABLE_STONEFISH)
-  ament_target_dependencies(${PROJECT_NAME}
-    stonefish_ros2
-  )
-endif()
-
 pluginlib_export_plugin_description_file(
   hardware_interface
   sura_hardware_plugins.xml
@@ -172,9 +157,5 @@ ament_export_dependencies(
 )
 
 ament_export_include_directories(include)
-
-if(SURA_ENABLE_STONEFISH)
-  ament_export_dependencies(stonefish_ros2)
-endif()
 
 ament_package()
