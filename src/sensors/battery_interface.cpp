@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 #include "pluginlib/class_list_macros.hpp"
+#include "sura_hardware_interface/navigator_access.hpp"
 
 #ifdef TARGET_RASPBERRY
 #include "bindings.h"
@@ -63,7 +64,7 @@ bool BatteryInterface::initialize(
 
 #ifdef TARGET_RASPBERRY
   if (environment_ == "real") {
-    init();
+    navigator_access::initialize_once();
   }
 #endif
 
@@ -107,8 +108,14 @@ bool BatteryInterface::read(std::unordered_map<std::string, double> & states)
 
 #ifdef TARGET_RASPBERRY
   if (environment_ == "real") {
-    const double voltage_adc = static_cast<double>(read_adc(kVoltageChannel));
-    const double current_adc = static_cast<double>(read_adc(kCurrentChannel));
+    double voltage_adc = 0.0;
+    double current_adc = 0.0;
+    navigator_access::call(
+      [&]()
+      {
+        voltage_adc = static_cast<double>(read_adc(kVoltageChannel));
+        current_adc = static_cast<double>(read_adc(kCurrentChannel));
+      });
 
     voltage = voltage_adc * kPsmVoltageMultiplier;
     current = (current_adc - kPsmCurrentOffset) * kPsmCurrentPerVolt;

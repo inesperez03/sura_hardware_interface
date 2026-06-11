@@ -13,6 +13,7 @@
 
 #include "ament_index_cpp/get_package_share_directory.hpp"
 #include "pluginlib/class_list_macros.hpp"
+#include "sura_hardware_interface/navigator_access.hpp"
 
 namespace sura_hardware_interface
 {
@@ -130,19 +131,23 @@ void ThrustersSystem::publish_zero_command()
   } else if (environment_ == "real" && navigator_initialized_ && pwm_enabled_) {
 #ifdef TARGET_RASPBERRY
     try {
-      for (std::size_t index = 0; index < pwm_channel_indices_.size(); ++index) {
-        double neutral_pulse_us = mapper_.forceToPwm(0.0);
-        if (index < inverted_flags_.size() && inverted_flags_[index]) {
-          neutral_pulse_us = 3000.0 - neutral_pulse_us;
-        }
-        if (index < pwm_offsets_us_.size()) {
-          neutral_pulse_us += pwm_offsets_us_[index];
-        }
+      navigator_access::call(
+        [&]()
+        {
+          for (std::size_t index = 0; index < pwm_channel_indices_.size(); ++index) {
+            double neutral_pulse_us = mapper_.forceToPwm(0.0);
+            if (index < inverted_flags_.size() && inverted_flags_[index]) {
+              neutral_pulse_us = 3000.0 - neutral_pulse_us;
+            }
+            if (index < pwm_offsets_us_.size()) {
+              neutral_pulse_us += pwm_offsets_us_[index];
+            }
 
-        set_pwm_channel_value(
-          static_cast<uintptr_t>(pwm_channel_indices_[index]),
-          pulse_us_to_counts(neutral_pulse_us, pwm_frequency_hz_));
-      }
+            set_pwm_channel_value(
+              static_cast<uintptr_t>(pwm_channel_indices_[index]),
+              pulse_us_to_counts(neutral_pulse_us, pwm_frequency_hz_));
+          }
+        });
     } catch (const std::exception & e) {
       RCLCPP_ERROR(kLogger, "Failed to send neutral PWM command: %s", e.what());
     } catch (...) {
@@ -348,30 +353,31 @@ hardware_interface::CallbackReturn ThrustersSystem::on_configure(
       return hardware_interface::CallbackReturn::ERROR;
     }
 
-    set_raspberry_pi_version(Raspberry::Pi4);
-    set_navigator_version(NavigatorVersion::Version1);
-
     try {
-      init();
+      navigator_access::initialize_once();
       navigator_initialized_ = true;
 
-      set_pwm_freq_hz(pwm_frequency_hz_);
-      set_pwm_enable(true);
+      navigator_access::call(
+        [&]()
+        {
+          set_pwm_freq_hz(pwm_frequency_hz_);
+          set_pwm_enable(true);
+
+          for (std::size_t index = 0; index < pwm_channel_indices_.size(); ++index) {
+            double neutral_pulse_us = mapper_.forceToPwm(0.0);
+            if (index < inverted_flags_.size() && inverted_flags_[index]) {
+              neutral_pulse_us = 3000.0 - neutral_pulse_us;
+            }
+            if (index < pwm_offsets_us_.size()) {
+              neutral_pulse_us += pwm_offsets_us_[index];
+            }
+
+            set_pwm_channel_value(
+              static_cast<uintptr_t>(pwm_channel_indices_[index]),
+              pulse_us_to_counts(neutral_pulse_us, pwm_frequency_hz_));
+          }
+        });
       pwm_enabled_ = true;
-
-      for (std::size_t index = 0; index < pwm_channel_indices_.size(); ++index) {
-        double neutral_pulse_us = mapper_.forceToPwm(0.0);
-        if (index < inverted_flags_.size() && inverted_flags_[index]) {
-          neutral_pulse_us = 3000.0 - neutral_pulse_us;
-        }
-        if (index < pwm_offsets_us_.size()) {
-          neutral_pulse_us += pwm_offsets_us_[index];
-        }
-
-        set_pwm_channel_value(
-          static_cast<uintptr_t>(pwm_channel_indices_[index]),
-          pulse_us_to_counts(neutral_pulse_us, pwm_frequency_hz_));
-      }
 
       RCLCPP_INFO(kLogger, "Navigator initialized successfully");
       RCLCPP_INFO(kLogger, "PWM enabled at %.2f Hz", pwm_frequency_hz_);
@@ -431,7 +437,11 @@ hardware_interface::CallbackReturn ThrustersSystem::on_cleanup(
 #ifdef TARGET_RASPBERRY
   if (environment_ == "real" && navigator_initialized_) {
     try {
-      set_pwm_enable(false);
+      navigator_access::call(
+        []()
+        {
+          set_pwm_enable(false);
+        });
     } catch (const std::exception & e) {
       RCLCPP_ERROR(kLogger, "Failed to disable PWM during cleanup: %s", e.what());
     } catch (...) {
@@ -473,7 +483,11 @@ hardware_interface::CallbackReturn ThrustersSystem::on_shutdown(
 #ifdef TARGET_RASPBERRY
   if (environment_ == "real" && navigator_initialized_) {
     try {
-      set_pwm_enable(false);
+      navigator_access::call(
+        []()
+        {
+          set_pwm_enable(false);
+        });
     } catch (const std::exception & e) {
       RCLCPP_ERROR(kLogger, "Failed to disable PWM during shutdown: %s", e.what());
     } catch (...) {
@@ -529,7 +543,11 @@ hardware_interface::CallbackReturn ThrustersSystem::on_deactivate(
 #ifdef TARGET_RASPBERRY
   if (environment_ == "real" && navigator_initialized_) {
     try {
-      set_pwm_enable(false);
+      navigator_access::call(
+        []()
+        {
+          set_pwm_enable(false);
+        });
       pwm_enabled_ = false;
     } catch (const std::exception & e) {
       RCLCPP_ERROR(kLogger, "Failed to disable PWM during deactivation: %s", e.what());
@@ -557,7 +575,11 @@ hardware_interface::CallbackReturn ThrustersSystem::on_error(
 #ifdef TARGET_RASPBERRY
   if (environment_ == "real" && navigator_initialized_) {
     try {
-      set_pwm_enable(false);
+      navigator_access::call(
+        []()
+        {
+          set_pwm_enable(false);
+        });
     } catch (const std::exception & e) {
       RCLCPP_ERROR(kLogger, "Failed to disable PWM during error handling: %s", e.what());
     } catch (...) {
@@ -673,11 +695,15 @@ hardware_interface::return_type ThrustersSystem::write(
     }
 
     try {
-      for (std::size_t index = 0; index < pwm_channel_indices_.size(); ++index) {
-        set_pwm_channel_value(
-          static_cast<uintptr_t>(pwm_channel_indices_[index]),
-          pwm_counts[index]);
-      }
+      navigator_access::call(
+        [&]()
+        {
+          for (std::size_t index = 0; index < pwm_channel_indices_.size(); ++index) {
+            set_pwm_channel_value(
+              static_cast<uintptr_t>(pwm_channel_indices_[index]),
+              pwm_counts[index]);
+          }
+        });
     } catch (const std::exception & e) {
       RCLCPP_ERROR(kLogger, "Failed to write PWM to Navigator: %s", e.what());
       return hardware_interface::return_type::ERROR;

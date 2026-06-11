@@ -61,6 +61,7 @@ else()
 endif()
 
 add_library(${PROJECT_NAME} SHARED
+  src/navigator_access.cpp
   src/thrusters/thrusters_system.cpp
   src/thrusters/thruster_mapper.cpp
   src/actuators/actuators_system.cpp

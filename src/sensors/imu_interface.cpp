@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 #include "pluginlib/class_list_macros.hpp"
+#include "sura_hardware_interface/navigator_access.hpp"
 #include "sensor_msgs/msg/imu.hpp"
 
 #ifdef TARGET_RASPBERRY
@@ -96,7 +97,7 @@ bool ImuInterface::initialize(
 
   if (environment_ == "real") {
 #ifdef TARGET_RASPBERRY
-    init();
+    navigator_access::initialize_once();
 #endif
   }
 
@@ -118,6 +119,9 @@ bool ImuInterface::initialize(
       rclcpp::SensorDataQoS(),
       [this](const sensor_msgs::msg::Imu::SharedPtr msg)
       {
+        last_sample_time_sec_ = msg->header.stamp.sec;
+        last_sample_time_nanosec_ = msg->header.stamp.nanosec;
+
         last_orientation_x_ = msg->orientation.x;
         last_orientation_y_ = msg->orientation.y;
         last_orientation_z_ = msg->orientation.z;
@@ -175,6 +179,9 @@ bool ImuInterface::cleanup()
   last_linear_acceleration_y_ = 0.0;
   last_linear_acceleration_z_ = 0.0;
 
+  last_sample_time_sec_ = 0;
+  last_sample_time_nanosec_ = 0;
+
   return true;
 }
 
@@ -197,10 +204,21 @@ bool ImuInterface::read(std::unordered_map<std::string, double> & states)
   double linear_acceleration_y = 0.0;
   double linear_acceleration_z = 0.0;
 
+  const auto read_time = rclcpp::Clock(RCL_SYSTEM_TIME).now();
+  int32_t sample_time_sec = static_cast<int32_t>(read_time.seconds());
+  uint32_t sample_time_nanosec =
+    static_cast<uint32_t>(read_time.nanoseconds() % 1000000000LL);
+
   if (environment_ == "real") {
 #ifdef TARGET_RASPBERRY
-    const AxisData accel = read_accel();
-    const AxisData gyro = read_gyro();
+    AxisData accel{};
+    AxisData gyro{};
+    navigator_access::call(
+      [&]()
+      {
+        accel = read_accel();
+        gyro = read_gyro();
+      });
 
     // Navigator IMU frame is SWD. Convert to NED by inverting X and Y.
     angular_velocity_x = static_cast<double>(-gyro.x);
@@ -212,6 +230,11 @@ bool ImuInterface::read(std::unordered_map<std::string, double> & states)
     linear_acceleration_z = static_cast<double>(accel.z);
 #endif
   } else {
+    if (last_sample_time_sec_ != 0 || last_sample_time_nanosec_ != 0) {
+      sample_time_sec = last_sample_time_sec_;
+      sample_time_nanosec = last_sample_time_nanosec_;
+    }
+
     orientation_x = last_orientation_x_;
     orientation_y = last_orientation_y_;
     orientation_z = last_orientation_z_;
@@ -238,6 +261,8 @@ bool ImuInterface::read(std::unordered_map<std::string, double> & states)
   set_state_if_exists(states, "linear_acceleration.x", linear_acceleration_x);
   set_state_if_exists(states, "linear_acceleration.y", linear_acceleration_y);
   set_state_if_exists(states, "linear_acceleration.z", linear_acceleration_z);
+  set_state_if_exists(states, "sample_time.sec", static_cast<double>(sample_time_sec));
+  set_state_if_exists(states, "sample_time.nanosec", static_cast<double>(sample_time_nanosec));
 
   return true;
 }

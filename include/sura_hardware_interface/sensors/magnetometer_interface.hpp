@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 
@@ -46,6 +47,9 @@ private:
   double last_magnetic_field_x_{0.0};
   double last_magnetic_field_y_{0.0};
   double last_magnetic_field_z_{0.0};
+
+  int32_t last_sample_time_sec_{0};
+  uint32_t last_sample_time_nanosec_{0};
 };
 
 }  // namespace sura_hardware_interface

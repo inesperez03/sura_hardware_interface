@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 #include "pluginlib/class_list_macros.hpp"
+#include "sura_hardware_interface/navigator_access.hpp"
 
 #ifdef TARGET_RASPBERRY
 #include "bindings.h"
@@ -76,7 +77,7 @@ bool LeakInterface::initialize(
 
   if (environment_ == "real") {
 #ifdef TARGET_RASPBERRY
-    init();
+    navigator_access::initialize_once();
 #endif
   }
 
@@ -119,7 +120,11 @@ bool LeakInterface::read(std::unordered_map<std::string, double> & states)
 
   if (environment_ == "real") {
 #ifdef TARGET_RASPBERRY
-    leak = read_leak() ? 1.0 : 0.0;
+    leak = navigator_access::call(
+      []()
+      {
+        return read_leak();
+      }) ? 1.0 : 0.0;
 #else
     leak = 0.0;
 #endif

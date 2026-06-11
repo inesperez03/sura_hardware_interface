@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 
@@ -54,6 +56,9 @@ private:
   double last_linear_acceleration_x_{0.0};
   double last_linear_acceleration_y_{0.0};
   double last_linear_acceleration_z_{0.0};
+
+  int32_t last_sample_time_sec_{0};
+  uint32_t last_sample_time_nanosec_{0};
 };
 
 }  // namespace sura_hardware_interface

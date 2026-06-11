@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 #include "pluginlib/class_list_macros.hpp"
+#include "sura_hardware_interface/navigator_access.hpp"
 
 #ifdef TARGET_RASPBERRY
 #include "bindings.h"
@@ -97,7 +98,7 @@ bool MagnetometerInterface::initialize(
 
   if (environment_ == "real") {
 #ifdef TARGET_RASPBERRY
-    init();
+    navigator_access::initialize_once();
 #endif
   }
 
@@ -120,6 +121,9 @@ bool MagnetometerInterface::initialize(
       rclcpp::SensorDataQoS(),
       [this](const sensor_msgs::msg::MagneticField::SharedPtr msg)
       {
+        last_sample_time_sec_ = msg->header.stamp.sec;
+        last_sample_time_nanosec_ = msg->header.stamp.nanosec;
+
         last_magnetic_field_x_ = msg->magnetic_field.x;
         last_magnetic_field_y_ = msg->magnetic_field.y;
         last_magnetic_field_z_ = msg->magnetic_field.z;
@@ -160,6 +164,9 @@ bool MagnetometerInterface::cleanup()
   last_magnetic_field_y_ = 0.0;
   last_magnetic_field_z_ = 0.0;
 
+  last_sample_time_sec_ = 0;
+  last_sample_time_nanosec_ = 0;
+
   return true;
 }
 
@@ -169,13 +176,22 @@ bool MagnetometerInterface::read(std::unordered_map<std::string, double> & state
     return false;
   }
 
+  const auto read_time = rclcpp::Clock(RCL_SYSTEM_TIME).now();
+  int32_t sample_time_sec = static_cast<int32_t>(read_time.seconds());
+  uint32_t sample_time_nanosec =
+    static_cast<uint32_t>(read_time.nanoseconds() % 1000000000LL);
+
   double magnetic_field_x = 0.0;
   double magnetic_field_y = 0.0;
   double magnetic_field_z = 0.0;
 
   if (environment_ == "real") {
 #ifdef TARGET_RASPBERRY
-    const AxisData mag = read_mag();
+    const AxisData mag = navigator_access::call(
+      []()
+      {
+        return read_mag();
+      });
 
     // ROTATION_YAW_270: x' = y, y' = -x, z' = z
     magnetic_field_x = static_cast<double>(mag.y);
@@ -183,6 +199,11 @@ bool MagnetometerInterface::read(std::unordered_map<std::string, double> & state
     magnetic_field_z = static_cast<double>(mag.z);
 #endif
   } else {
+    if (last_sample_time_sec_ != 0 || last_sample_time_nanosec_ != 0) {
+      sample_time_sec = last_sample_time_sec_;
+      sample_time_nanosec = last_sample_time_nanosec_;
+    }
+
     magnetic_field_x = last_magnetic_field_x_;
     magnetic_field_y = last_magnetic_field_y_;
     magnetic_field_z = last_magnetic_field_z_;
@@ -191,6 +212,8 @@ bool MagnetometerInterface::read(std::unordered_map<std::string, double> & state
   set_state_if_exists(states, "magnetic_field.x", magnetic_field_x);
   set_state_if_exists(states, "magnetic_field.y", magnetic_field_y);
   set_state_if_exists(states, "magnetic_field.z", magnetic_field_z);
+  set_state_if_exists(states, "sample_time.sec", static_cast<double>(sample_time_sec));
+  set_state_if_exists(states, "sample_time.nanosec", static_cast<double>(sample_time_nanosec));
 
   return true;
 }

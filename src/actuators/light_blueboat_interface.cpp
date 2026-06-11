@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "pluginlib/class_list_macros.hpp"
+#include "sura_hardware_interface/navigator_access.hpp"
 
 namespace sura_hardware_interface
 {
@@ -72,18 +73,19 @@ bool LightBlueboatInterface::initialize(
 
   if (environment_ == "real") {
 #ifdef TARGET_RASPBERRY
-    set_raspberry_pi_version(Raspberry::Pi4);
-    set_navigator_version(NavigatorVersion::Version1);
-
-    init();
+    navigator_access::initialize_once();
     navigator_initialized_ = true;
 
     // Share the Navigator PWM block with the thruster stack. We keep the same
     // 50 Hz frequency so channel 1 can be used like a binary relay output.
-    set_pwm_freq_hz(pwm_frequency_hz_);
-    set_pwm_enable(true);
+    navigator_access::call(
+      [&]()
+      {
+        set_pwm_freq_hz(pwm_frequency_hz_);
+        set_pwm_enable(true);
+        set_pwm_channel_duty_cycle(static_cast<uintptr_t>(status_light_channel_), 1.0F);
+      });
     pwm_enabled_ = true;
-    set_pwm_channel_duty_cycle(static_cast<uintptr_t>(status_light_channel_), 1.0F);
 #else
     return false;
 #endif
@@ -160,9 +162,13 @@ bool LightBlueboatInterface::write_enabled(bool enabled)
 
   // NavLight turns off when the signal is pulled to ground. We model the
   // logical command as enabled=true, so channel HIGH means light ON.
-  set_pwm_channel_duty_cycle(
-    static_cast<uintptr_t>(status_light_channel_),
-    enabled ? 1.0F : 0.0F);
+  navigator_access::call(
+    [&]()
+    {
+      set_pwm_channel_duty_cycle(
+        static_cast<uintptr_t>(status_light_channel_),
+        enabled ? 1.0F : 0.0F);
+    });
   return true;
 #else
   (void)enabled;

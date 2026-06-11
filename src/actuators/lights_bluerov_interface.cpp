@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "pluginlib/class_list_macros.hpp"
+#include "sura_hardware_interface/navigator_access.hpp"
 
 namespace sura_hardware_interface
 {
@@ -89,14 +90,15 @@ bool LightsBluerovInterface::initialize(
 
   if (environment_ == "real") {
 #ifdef TARGET_RASPBERRY
-    set_raspberry_pi_version(Raspberry::Pi4);
-    set_navigator_version(NavigatorVersion::Version1);
-
-    init();
+    navigator_access::initialize_once();
     navigator_initialized_ = true;
 
-    set_pwm_freq_hz(pwm_frequency_hz_);
-    set_pwm_enable(true);
+    navigator_access::call(
+      [&]()
+      {
+        set_pwm_freq_hz(pwm_frequency_hz_);
+        set_pwm_enable(true);
+      });
     pwm_enabled_ = true;
     write_pwm_us(kMinLightsPwmUs);
 #else
@@ -202,7 +204,11 @@ bool LightsBluerovInterface::write_pwm_us(double pwm_us)
   }
 
   const uint16_t counts = pulse_us_to_counts(clamp_lights_pwm(pwm_us), pwm_frequency_hz_);
-  set_pwm_channel_value(static_cast<uintptr_t>(lights_channel_), counts);
+  navigator_access::call(
+    [&]()
+    {
+      set_pwm_channel_value(static_cast<uintptr_t>(lights_channel_), counts);
+    });
   return true;
 #else
   (void)pwm_us;
