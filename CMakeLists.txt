@@ -14,6 +14,7 @@ find_package(rclcpp_lifecycle REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(TinyXML2 REQUIRED)
 
 # Detect architecture
 string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" SURA_SYSTEM_PROCESSOR)
@@ -75,6 +76,7 @@ add_library(${PROJECT_NAME} SHARED
   src/sensors/altimeter_blueboat_interface.cpp
   src/sensors/gps_interface.cpp
   src/sensors/dvl75_interface.cpp
+  src/sensors/dvla50_interface.cpp
   src/sensors/leak_interface.cpp
 )
 
@@ -109,6 +111,22 @@ ament_target_dependencies(${PROJECT_NAME}
   std_msgs
 )
 
+add_executable(thruster_force_publisher
+  src/thrusters/thruster_force_publisher_node.cpp
+)
+
+target_compile_features(thruster_force_publisher PUBLIC cxx_std_17)
+
+target_link_libraries(thruster_force_publisher
+  tinyxml2::tinyxml2
+)
+
+ament_target_dependencies(thruster_force_publisher
+  rclcpp
+  geometry_msgs
+  std_msgs
+)
+
 pluginlib_export_plugin_description_file(
   hardware_interface
   sura_hardware_plugins.xml
@@ -122,6 +140,11 @@ pluginlib_export_plugin_description_file(
 install(
   TARGETS ${PROJECT_NAME}
   DESTINATION lib
+)
+
+install(
+  TARGETS thruster_force_publisher
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(
