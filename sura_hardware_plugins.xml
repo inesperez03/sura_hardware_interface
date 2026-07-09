@@ -106,6 +106,15 @@
       Sensor interface for DVL readings
     </description>
   </class>
+
+  <class
+    name="sura_hardware_interface/DvlA50Interface"
+    type="sura_hardware_interface::DvlA50Interface"
+    base_class_type="sura_hardware_interface::SensorInterfaceBase">
+    <description>
+      Sensor interface for Water Linked DVL-A50 velocity reports
+    </description>
+  </class>
   
   <class
     name="sura_hardware_interface/GpsInterface"
