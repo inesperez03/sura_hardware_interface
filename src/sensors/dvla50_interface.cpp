@@ -3,15 +3,10 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
-#include <cmath>
-#include <cstring>
 #include <exception>
-#include <iostream>
 #include <regex>
-#include <sstream>
 #include <string>
 #include <unordered_map>
-#include <vector>
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -102,6 +97,12 @@ bool regex_string(const std::string & text, const std::string & key, std::string
   return true;
 }
 
+bool is_velocity_report(const std::string & json)
+{
+  std::string type;
+  return regex_string(json, "type", type) && type == "velocity";
+}
+
 }  // namespace
 
 bool DvlA50Interface::initialize(
@@ -119,7 +120,6 @@ bool DvlA50Interface::initialize(
   sim_node_ = sim_node;
 
   if (environment_ != "real" && environment_ != "sim") {
-    std::cerr << "[DVL-A50] Unsupported environment: " << environment_ << std::endl;
     return false;
   }
 
@@ -132,15 +132,12 @@ bool DvlA50Interface::initialize(
     stonefish_topic_ = get_param_or(sensor_info, "stonefish_topic", stonefish_topic_);
     stonefish_altitude_topic_ =
       get_param_or(sensor_info, "stonefish_altitude_topic", stonefish_altitude_topic_);
-  } catch (const std::exception & e) {
-    std::cerr << "[DVL-A50] Error parsing parameters for sensor '"
-              << sensor_name_ << "': " << e.what() << std::endl;
+  } catch (const std::exception &) {
     return false;
   }
 
   if (environment_ == "sim") {
     if (!sim_node_) {
-      std::cerr << "[DVL-A50] sim_node is null in simulation mode" << std::endl;
       return false;
     }
 
@@ -228,6 +225,21 @@ bool DvlA50Interface::read(std::unordered_map<std::string, double> & states)
   }
 
   if (environment_ == "real") {
+    if (socket_fd_ < 0) {
+      static auto last_reconnect_attempt = std::chrono::steady_clock::time_point{};
+      const auto reconnect_now = std::chrono::steady_clock::now();
+
+      if (reconnect_now - last_reconnect_attempt > std::chrono::seconds(1)) {
+        last_reconnect_attempt = reconnect_now;
+
+        if (!setupConnection()) {
+          return false;
+        }
+      } else {
+        return false;
+      }
+    }
+
     receiveAndParseAvailable();
   }
 
@@ -252,8 +264,6 @@ bool DvlA50Interface::setupConnection()
 
   socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (socket_fd_ < 0) {
-    std::cerr << "[DVL-A50] Error creating TCP socket: "
-              << std::strerror(errno) << std::endl;
     return false;
   }
 
@@ -262,15 +272,12 @@ bool DvlA50Interface::setupConnection()
   dvl_addr.sin_port = htons(static_cast<uint16_t>(dvl_port_));
 
   if (inet_pton(AF_INET, dvl_ip_.c_str(), &dvl_addr.sin_addr) <= 0) {
-    std::cerr << "[DVL-A50] Invalid DVL IP: " << dvl_ip_ << std::endl;
     closeConnection();
     return false;
   }
 
   const int flags = fcntl(socket_fd_, F_GETFL, 0);
   if (flags < 0 || fcntl(socket_fd_, F_SETFL, flags | O_NONBLOCK) < 0) {
-    std::cerr << "[DVL-A50] Error setting non-blocking socket: "
-              << std::strerror(errno) << std::endl;
     closeConnection();
     return false;
   }
@@ -281,9 +288,6 @@ bool DvlA50Interface::setupConnection()
     sizeof(dvl_addr));
 
   if (result < 0 && errno != EINPROGRESS) {
-    std::cerr << "[DVL-A50] Error connecting to "
-              << dvl_ip_ << ":" << dvl_port_ << ": "
-              << std::strerror(errno) << std::endl;
     closeConnection();
     return false;
   }
@@ -298,8 +302,6 @@ bool DvlA50Interface::setupConnection()
 
   const int ready = select(socket_fd_ + 1, nullptr, &write_fds, nullptr, &timeout);
   if (ready <= 0) {
-    std::cerr << "[DVL-A50] Connection timeout to "
-              << dvl_ip_ << ":" << dvl_port_ << std::endl;
     closeConnection();
     return false;
   }
@@ -309,14 +311,10 @@ bool DvlA50Interface::setupConnection()
   if (getsockopt(socket_fd_, SOL_SOCKET, SO_ERROR, &socket_error, &socket_error_len) < 0 ||
       socket_error != 0)
   {
-    std::cerr << "[DVL-A50] Error connecting to "
-              << dvl_ip_ << ":" << dvl_port_ << ": "
-              << std::strerror(socket_error == 0 ? errno : socket_error) << std::endl;
     closeConnection();
     return false;
   }
 
-  std::cout << "[DVL-A50] Connected to " << dvl_ip_ << ":" << dvl_port_ << std::endl;
   return true;
 }
 
@@ -335,7 +333,8 @@ bool DvlA50Interface::receiveAndParseAvailable()
   }
 
   std::array<char, 4096> buffer{};
-  bool parsed_any = false;
+  std::string latest_velocity_report;
+  bool has_latest_velocity_report = false;
 
   while (true) {
     const ssize_t n = recv(socket_fd_, buffer.data(), buffer.size(), 0);
@@ -344,33 +343,37 @@ bool DvlA50Interface::receiveAndParseAvailable()
         break;
       }
 
-      std::cerr << "[DVL-A50] recv error: " << std::strerror(errno) << std::endl;
       closeConnection();
       break;
     }
 
     if (n == 0) {
-      std::cerr << "[DVL-A50] Socket closed by peer" << std::endl;
       closeConnection();
       break;
     }
 
     rx_buffer_.append(buffer.data(), static_cast<size_t>(n));
 
-    size_t newline = rx_buffer_.find('\n');
+    size_t line_start = 0;
+    size_t newline = rx_buffer_.find('\n', line_start);
     while (newline != std::string::npos) {
-      std::string line = rx_buffer_.substr(0, newline);
-      rx_buffer_.erase(0, newline + 1);
+      std::string line = rx_buffer_.substr(line_start, newline - line_start);
 
       if (!line.empty() && line.back() == '\r') {
         line.pop_back();
       }
 
-      if (!line.empty() && parseVelocityReport(line)) {
-        parsed_any = true;
+      if (!line.empty() && is_velocity_report(line)) {
+        latest_velocity_report = line;
+        has_latest_velocity_report = true;
       }
 
-      newline = rx_buffer_.find('\n');
+      line_start = newline + 1;
+      newline = rx_buffer_.find('\n', line_start);
+    }
+
+    if (line_start > 0) {
+      rx_buffer_.erase(0, line_start);
     }
 
     if (rx_buffer_.size() > 65536) {
@@ -378,13 +381,21 @@ bool DvlA50Interface::receiveAndParseAvailable()
     }
   }
 
-  return parsed_any;
+  if (has_latest_velocity_report) {
+    return parseVelocityReport(latest_velocity_report);
+  }
+
+  return false;
 }
 
 bool DvlA50Interface::parseVelocityReport(const std::string & json)
 {
   std::string type;
-  if (!regex_string(json, "type", type) || type != "velocity") {
+  if (!regex_string(json, "type", type)) {
+    return false;
+  }
+
+  if (type != "velocity") {
     return false;
   }
 
@@ -397,13 +408,22 @@ bool DvlA50Interface::parseVelocityReport(const std::string & json)
   double status = 0.0;
   bool velocity_valid = false;
 
-  if (!regex_double(json, "vx", vx) ||
-      !regex_double(json, "vy", vy) ||
-      !regex_double(json, "vz", vz) ||
-      !regex_double(json, "fom", fom) ||
-      !regex_double(json, "altitude", altitude) ||
-      !regex_bool(json, "velocity_valid", velocity_valid))
-  {
+  if (!regex_double(json, "vx", vx)) {
+    return false;
+  }
+  if (!regex_double(json, "vy", vy)) {
+    return false;
+  }
+  if (!regex_double(json, "vz", vz)) {
+    return false;
+  }
+  if (!regex_double(json, "fom", fom)) {
+    return false;
+  }
+  if (!regex_double(json, "altitude", altitude)) {
+    return false;
+  }
+  if (!regex_bool(json, "velocity_valid", velocity_valid)) {
     return false;
   }
 

@@ -93,6 +93,12 @@ private:
   double last_status_{0.0};
   double last_format_code_{0.0};
   std::array<BeamData, 4> last_beams_{};
+
+  bool has_last_logged_state_{false};
+  double last_logged_vx_{0.0};
+  double last_logged_vy_{0.0};
+  double last_logged_vz_{0.0};
+  double last_logged_time_{0.0};
 };
 
 }  // namespace sura_hardware_interface
