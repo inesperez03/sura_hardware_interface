@@ -1,10 +1,12 @@
 #pragma once
 
+#include <limits>
 #include <string>
 #include <unordered_map>
 
 #include "hardware_interface/hardware_info.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/msg/battery_state.hpp"
 
 #include "sura_hardware_interface/sensors/sensor_interface_base.hpp"
 
@@ -36,6 +38,14 @@ private:
   std::string environment_{"real"};
 
   double read_rate_hz_{1.0};
+  rclcpp::Node::SharedPtr sim_node_;
+  rclcpp::Subscription<sensor_msgs::msg::BatteryState>::SharedPtr battery_sub_;
+
+  std::string stonefish_topic_;
+
+  double last_voltage_{std::numeric_limits<double>::quiet_NaN()};
+  double last_current_{std::numeric_limits<double>::quiet_NaN()};
+  double last_present_{0.0};
 };
 
 }  // namespace sura_hardware_interface
