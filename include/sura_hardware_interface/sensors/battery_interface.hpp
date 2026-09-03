@@ -45,6 +45,7 @@ private:
 
   double last_voltage_{std::numeric_limits<double>::quiet_NaN()};
   double last_current_{std::numeric_limits<double>::quiet_NaN()};
+  double last_percentage_{std::numeric_limits<double>::quiet_NaN()};
   double last_present_{0.0};
 };
 

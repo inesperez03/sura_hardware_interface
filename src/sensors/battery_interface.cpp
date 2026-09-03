@@ -120,6 +120,7 @@ bool BatteryInterface::initialize(
       {
         last_voltage_ = msg->voltage;
         last_current_ = msg->current;
+        last_percentage_ = msg->percentage;
         last_present_ = msg->present ? 1.0 : 0.0;
       });
   }
@@ -155,6 +156,7 @@ bool BatteryInterface::cleanup()
 
   last_voltage_ = std::numeric_limits<double>::quiet_NaN();
   last_current_ = std::numeric_limits<double>::quiet_NaN();
+  last_percentage_ = std::numeric_limits<double>::quiet_NaN();
   last_present_ = 0.0;
 
   return true;
@@ -168,6 +170,7 @@ bool BatteryInterface::read(std::unordered_map<std::string, double> & states)
 
   double voltage = std::numeric_limits<double>::quiet_NaN();
   double current = std::numeric_limits<double>::quiet_NaN();
+  double percentage = std::numeric_limits<double>::quiet_NaN();
   double present = 0.0;
 
 #ifdef TARGET_RASPBERRY
@@ -195,6 +198,7 @@ bool BatteryInterface::read(std::unordered_map<std::string, double> & states)
   if (environment_ == "sim") {
     voltage = last_voltage_;
     current = last_current_;
+    percentage = last_percentage_;
     present = last_present_;
   }
 
@@ -204,6 +208,10 @@ bool BatteryInterface::read(std::unordered_map<std::string, double> & states)
 
   if (has_state(states, "current")) {
     states["current"] = current;
+  }
+
+  if (has_state(states, "percentage")) {
+    states["percentage"] = percentage;
   }
 
   if (has_state(states, "present")) {
