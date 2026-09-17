@@ -93,6 +93,18 @@ std::string optional_joint_parameter(
   return parameter_it->second;
 }
 
+std::string optional_hardware_parameter(
+  const hardware_interface::HardwareInfo & info,
+  const std::string & parameter_name)
+{
+  const auto parameter_it = info.hardware_parameters.find(parameter_name);
+  if (parameter_it == info.hardware_parameters.end()) {
+    return "";
+  }
+
+  return parameter_it->second;
+}
+
 std::string resolve_lookup_csv_path(const std::string & lookup_csv_path)
 {
   const std::filesystem::path path{lookup_csv_path};
@@ -122,6 +134,36 @@ void ThrustersSystem::reset_thruster_filter()
   filtered_force_commands_.assign(info_.joints.size(), 0.0);
 }
 
+double ThrustersSystem::neutral_pwm_us(std::size_t index) const
+{
+  double neutral_pulse_us = mapper_.forceToPwm(0.0);
+  if (index < inverted_flags_.size() && inverted_flags_[index]) {
+    neutral_pulse_us = 3000.0 - neutral_pulse_us;
+  }
+  if (index < pwm_offsets_us_.size()) {
+    neutral_pulse_us += pwm_offsets_us_[index];
+  }
+
+  return std::clamp(neutral_pulse_us, thruster_pwm_min_us_, thruster_pwm_max_us_);
+}
+
+void ThrustersSystem::reset_thruster_pwm_ramp()
+{
+  last_pwm_commands_us_.assign(info_.joints.size(), 0.0);
+
+  if (!mapper_.isLoaded()) {
+    std::fill(
+      last_pwm_commands_us_.begin(),
+      last_pwm_commands_us_.end(),
+      std::numeric_limits<double>::quiet_NaN());
+    return;
+  }
+
+  for (std::size_t index = 0; index < info_.joints.size(); ++index) {
+    last_pwm_commands_us_[index] = neutral_pwm_us(index);
+  }
+}
+
 void ThrustersSystem::publish_zero_command()
 {
   if (environment_ == "sim" && thruster_stonefish_pub_) {
@@ -135,13 +177,7 @@ void ThrustersSystem::publish_zero_command()
         [&]()
         {
           for (std::size_t index = 0; index < pwm_channel_indices_.size(); ++index) {
-            double neutral_pulse_us = mapper_.forceToPwm(0.0);
-            if (index < inverted_flags_.size() && inverted_flags_[index]) {
-              neutral_pulse_us = 3000.0 - neutral_pulse_us;
-            }
-            if (index < pwm_offsets_us_.size()) {
-              neutral_pulse_us += pwm_offsets_us_[index];
-            }
+            const double neutral_pulse_us = neutral_pwm_us(index);
 
             set_pwm_channel_value(
               static_cast<uintptr_t>(pwm_channel_indices_[index]),
@@ -207,6 +243,8 @@ hardware_interface::CallbackReturn ThrustersSystem::on_init(
   last_outputs_.assign(
     info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
   reset_thruster_filter();
+  last_pwm_commands_us_.assign(
+    info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
   inverted_flags_.assign(info_.joints.size(), false);
   pwm_offsets_us_.assign(info_.joints.size(), 0.0);
   pwm_channel_indices_.clear();
@@ -292,23 +330,67 @@ hardware_interface::CallbackReturn ThrustersSystem::on_init(
   navigator_initialized_ = false;
   pwm_enabled_ = false;
 
-  thruster_lpf_alpha_ = 1.0;
-  if (const char * alpha_env = std::getenv(kThrusterLpfAlphaEnv); alpha_env != nullptr) {
-    try {
-      thruster_lpf_alpha_ = std::clamp(parse_double_parameter(alpha_env), 0.0, 1.0);
-    } catch (const std::exception & e) {
-      RCLCPP_WARN(
-        kLogger,
-        "Invalid %s value '%s': %s. Falling back to alpha=1.0",
-        kThrusterLpfAlphaEnv,
-        alpha_env,
-        e.what());
+  try {
+    const std::string alpha_value = optional_hardware_parameter(info_, "thruster_lpf_alpha");
+    if (!alpha_value.empty()) {
+      thruster_lpf_alpha_ = std::clamp(parse_double_parameter(alpha_value), 0.0, 1.0);
+    } else if (const char * alpha_env = std::getenv(kThrusterLpfAlphaEnv); alpha_env != nullptr) {
+      try {
+        thruster_lpf_alpha_ = std::clamp(parse_double_parameter(alpha_env), 0.0, 1.0);
+      } catch (const std::exception & e) {
+        RCLCPP_WARN(
+          kLogger,
+          "Invalid %s value '%s': %s. Falling back to alpha=1.0",
+          kThrusterLpfAlphaEnv,
+          alpha_env,
+          e.what());
+        thruster_lpf_alpha_ = 1.0;
+      }
+    } else {
       thruster_lpf_alpha_ = 1.0;
     }
-  } else {
+
+    const std::string pwm_ramp_rate_value =
+      optional_hardware_parameter(info_, "thruster_pwm_ramp_rate_us_per_s");
+    if (!pwm_ramp_rate_value.empty()) {
+      thruster_pwm_ramp_rate_us_per_s_ =
+        std::max(0.0, parse_double_parameter(pwm_ramp_rate_value));
+    } else {
+      thruster_pwm_ramp_rate_us_per_s_ = 0.0;
+    }
+
+    const std::string pwm_min_value =
+      optional_hardware_parameter(info_, "thruster_pwm_min_us");
+    if (!pwm_min_value.empty()) {
+      thruster_pwm_min_us_ = parse_double_parameter(pwm_min_value);
+    } else {
+      thruster_pwm_min_us_ = 1100.0;
+    }
+
+    const std::string pwm_max_value =
+      optional_hardware_parameter(info_, "thruster_pwm_max_us");
+    if (!pwm_max_value.empty()) {
+      thruster_pwm_max_us_ = parse_double_parameter(pwm_max_value);
+    } else {
+      thruster_pwm_max_us_ = 1900.0;
+    }
+
+    if (thruster_pwm_min_us_ > thruster_pwm_max_us_) {
+      throw std::runtime_error(
+        "thruster_pwm_min_us must be less than or equal to thruster_pwm_max_us");
+    }
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(kLogger, "Invalid thruster hardware parameter: %s", e.what());
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  if (
+    optional_hardware_parameter(info_, "thruster_lpf_alpha").empty() &&
+    std::getenv(kThrusterLpfAlphaEnv) == nullptr)
+  {
     RCLCPP_INFO(
       kLogger,
-      "%s not set. Thruster LPF disabled (alpha=1.0)",
+      "%s not set and thruster_lpf_alpha not configured. Thruster LPF disabled (alpha=1.0)",
       kThrusterLpfAlphaEnv);
   }
 
@@ -327,6 +409,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_configure(
       resolved_lookup_csv_path.c_str());
     return hardware_interface::CallbackReturn::ERROR;
   }
+  reset_thruster_pwm_ramp();
 
   is_active_ = false;
 
@@ -364,13 +447,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_configure(
           set_pwm_enable(true);
 
           for (std::size_t index = 0; index < pwm_channel_indices_.size(); ++index) {
-            double neutral_pulse_us = mapper_.forceToPwm(0.0);
-            if (index < inverted_flags_.size() && inverted_flags_[index]) {
-              neutral_pulse_us = 3000.0 - neutral_pulse_us;
-            }
-            if (index < pwm_offsets_us_.size()) {
-              neutral_pulse_us += pwm_offsets_us_[index];
-            }
+            const double neutral_pulse_us = neutral_pwm_us(index);
 
             set_pwm_channel_value(
               static_cast<uintptr_t>(pwm_channel_indices_[index]),
@@ -413,12 +490,22 @@ hardware_interface::CallbackReturn ThrustersSystem::on_configure(
     last_outputs_.begin(),
     last_outputs_.end(),
     std::numeric_limits<double>::quiet_NaN());
+  reset_thruster_pwm_ramp();
 
   RCLCPP_INFO(kLogger, "ThrustersSystem configured successfully");
   RCLCPP_INFO(kLogger, "Environment: %s", environment_.c_str());
   RCLCPP_INFO(kLogger, "Thruster joints: %zu", info_.joints.size());
   RCLCPP_INFO(kLogger, "Loaded CSV samples: %zu", mapper_.size());
   RCLCPP_INFO(kLogger, "Thruster LPF alpha: %.3f", thruster_lpf_alpha_);
+  RCLCPP_INFO(
+    kLogger,
+    "Thruster PWM ramp rate: %.3f us/s",
+    thruster_pwm_ramp_rate_us_per_s_);
+  RCLCPP_INFO(
+    kLogger,
+    "Thruster PWM clamp: [%.3f, %.3f] us",
+    thruster_pwm_min_us_,
+    thruster_pwm_max_us_);
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -431,6 +518,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_cleanup(
   std::fill(force_commands_.begin(), force_commands_.end(), 0.0);
   std::fill(force_states_.begin(), force_states_.end(), 0.0);
   reset_thruster_filter();
+  reset_thruster_pwm_ramp();
 
   publish_zero_command();
 
@@ -477,6 +565,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_shutdown(
   std::fill(force_commands_.begin(), force_commands_.end(), 0.0);
   std::fill(force_states_.begin(), force_states_.end(), 0.0);
   reset_thruster_filter();
+  reset_thruster_pwm_ramp();
 
   publish_zero_command();
 
@@ -514,6 +603,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_activate(
   std::fill(force_commands_.begin(), force_commands_.end(), 0.0);
   std::fill(force_states_.begin(), force_states_.end(), 0.0);
   reset_thruster_filter();
+  reset_thruster_pwm_ramp();
   std::fill(
     last_force_commands_.begin(),
     last_force_commands_.end(),
@@ -537,6 +627,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_deactivate(
   std::fill(force_commands_.begin(), force_commands_.end(), 0.0);
   std::fill(force_states_.begin(), force_states_.end(), 0.0);
   reset_thruster_filter();
+  reset_thruster_pwm_ramp();
 
   publish_zero_command();
 
@@ -569,6 +660,7 @@ hardware_interface::CallbackReturn ThrustersSystem::on_error(
   std::fill(force_commands_.begin(), force_commands_.end(), 0.0);
   std::fill(force_states_.begin(), force_states_.end(), 0.0);
   reset_thruster_filter();
+  reset_thruster_pwm_ramp();
 
   publish_zero_command();
 
@@ -636,8 +728,10 @@ hardware_interface::return_type ThrustersSystem::read(
 
 hardware_interface::return_type ThrustersSystem::write(
   const rclcpp::Time & /*time*/,
-  const rclcpp::Duration & /*period*/)
+  const rclcpp::Duration & period)
 {
+  (void)period;
+
   if (!is_active_) {
     std::fill(force_states_.begin(), force_states_.end(), 0.0);
     publish_zero_command();
@@ -648,9 +742,16 @@ hardware_interface::return_type ThrustersSystem::write(
   if (filtered_force_commands_.size() != info_.joints.size()) {
     reset_thruster_filter();
   }
+  if (last_pwm_commands_us_.size() != info_.joints.size()) {
+    reset_thruster_pwm_ramp();
+  }
 
 #ifdef TARGET_RASPBERRY
   std::vector<uint16_t> pwm_counts(info_.joints.size(), 0U);
+  double period_s = period.seconds();
+  if (!std::isfinite(period_s) || period_s <= 0.0) {
+    period_s = 1.0 / pwm_frequency_hz_;
+  }
 #endif
 
   for (std::size_t index = 0; index < info_.joints.size(); ++index) {
@@ -662,19 +763,32 @@ hardware_interface::return_type ThrustersSystem::write(
     stonefish_outputs[index] = mapper_.forceToStonefish(filtered_force);
 
 #ifdef TARGET_RASPBERRY
-    double applied_force = filtered_force;
-
-    if (environment_ == "real" && inverted_flags_[index]) {
-      applied_force = filtered_force;
-    }
-
-    double pulse_us = mapper_.forceToPwm(applied_force);
+    double pulse_us = mapper_.forceToPwm(filtered_force);
 
     if (environment_ == "real" && inverted_flags_[index]) {
       pulse_us = 3000.0 - pulse_us;
     }
 
     pulse_us += pwm_offsets_us_[index];
+    pulse_us = std::clamp(pulse_us, thruster_pwm_min_us_, thruster_pwm_max_us_);
+
+    if (environment_ == "real" && thruster_pwm_ramp_rate_us_per_s_ > 0.0) {
+      if (std::isnan(last_pwm_commands_us_[index])) {
+        last_pwm_commands_us_[index] = neutral_pwm_us(index);
+      }
+
+      const double max_delta = thruster_pwm_ramp_rate_us_per_s_ * period_s;
+      const double delta = std::clamp(
+        pulse_us - last_pwm_commands_us_[index],
+        -max_delta,
+        max_delta);
+      pulse_us = last_pwm_commands_us_[index] + delta;
+      pulse_us = std::clamp(pulse_us, thruster_pwm_min_us_, thruster_pwm_max_us_);
+    }
+
+    if (environment_ == "real") {
+      last_pwm_commands_us_[index] = pulse_us;
+    }
 
     pwm_counts[index] = pulse_us_to_counts(pulse_us, pwm_frequency_hz_);
 #endif

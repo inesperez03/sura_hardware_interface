@@ -99,11 +99,29 @@
   </class>
 
   <class
+    name="sura_hardware_interface/MultibeamInterface"
+    type="sura_hardware_interface::MultibeamInterface"
+    base_class_type="sura_hardware_interface::SensorInterfaceBase">
+    <description>
+      Sensor interface for a Blue Robotics Surveyor240 multibeam.
+    </description>
+  </class>
+
+  <class
     name="sura_hardware_interface/DvlInterface"
     type="sura_hardware_interface::DvlInterface"
     base_class_type="sura_hardware_interface::SensorInterfaceBase">
     <description>
       Sensor interface for DVL readings
+    </description>
+  </class>
+
+  <class
+    name="sura_hardware_interface/DvlA50Interface"
+    type="sura_hardware_interface::DvlA50Interface"
+    base_class_type="sura_hardware_interface::SensorInterfaceBase">
+    <description>
+      Sensor interface for Water Linked DVL-A50 velocity reports
     </description>
   </class>
   

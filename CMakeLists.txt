@@ -14,6 +14,7 @@ find_package(rclcpp_lifecycle REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(TinyXML2 REQUIRED)
 
 # Detect architecture
 string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" SURA_SYSTEM_PROCESSOR)
@@ -60,6 +61,21 @@ else()
   message(WARNING "Building sura_hardware_interface in desktop mode on architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
+add_library(${PROJECT_NAME}_multibeam_protocol STATIC
+  src/sensors/multibeam_ping_protocol.cpp
+  src/sensors/multibeam_tcp_client.cpp
+)
+
+target_include_directories(${PROJECT_NAME}_multibeam_protocol PUBLIC
+  include
+)
+
+target_compile_features(${PROJECT_NAME}_multibeam_protocol PUBLIC cxx_std_17)
+
+set_target_properties(${PROJECT_NAME}_multibeam_protocol PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+)
+
 add_library(${PROJECT_NAME} SHARED
   src/navigator_access.cpp
   src/thrusters/thrusters_system.cpp
@@ -73,13 +89,21 @@ add_library(${PROJECT_NAME} SHARED
   src/sensors/pressure_interface.cpp
   src/sensors/battery_interface.cpp
   src/sensors/altimeter_blueboat_interface.cpp
+  src/sensors/multibeam_interface.cpp
   src/sensors/gps_interface.cpp
   src/sensors/dvl75_interface.cpp
+  src/sensors/dvla50_interface.cpp
   src/sensors/leak_interface.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
   include
+)
+
+target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)
+
+target_link_libraries(${PROJECT_NAME}
+  ${PROJECT_NAME}_multibeam_protocol
 )
 
 if(TARGET_RASPBERRY)
@@ -109,6 +133,31 @@ ament_target_dependencies(${PROJECT_NAME}
   std_msgs
 )
 
+add_executable(thruster_force_publisher
+  src/thrusters/thruster_force_publisher_node.cpp
+)
+
+add_executable(multibeam_smoke_test
+  src/sensors/multibeam_smoke_test.cpp
+)
+
+target_compile_features(thruster_force_publisher PUBLIC cxx_std_17)
+target_compile_features(multibeam_smoke_test PUBLIC cxx_std_17)
+
+target_link_libraries(thruster_force_publisher
+  tinyxml2::tinyxml2
+)
+
+target_link_libraries(multibeam_smoke_test
+  ${PROJECT_NAME}_multibeam_protocol
+)
+
+ament_target_dependencies(thruster_force_publisher
+  rclcpp
+  geometry_msgs
+  std_msgs
+)
+
 pluginlib_export_plugin_description_file(
   hardware_interface
   sura_hardware_plugins.xml
@@ -122,6 +171,11 @@ pluginlib_export_plugin_description_file(
 install(
   TARGETS ${PROJECT_NAME}
   DESTINATION lib
+)
+
+install(
+  TARGETS thruster_force_publisher multibeam_smoke_test
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(
@@ -140,10 +194,18 @@ install(
 )
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   set(ament_cmake_copyright_FOUND TRUE)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  ament_add_gtest(test_multibeam_ping_protocol
+    test/test_multibeam_ping_protocol.cpp
+    src/sensors/multibeam_ping_protocol.cpp
+  )
+  target_include_directories(test_multibeam_ping_protocol PRIVATE include)
+  target_compile_features(test_multibeam_ping_protocol PUBLIC cxx_std_17)
 endif()
 
 ament_export_dependencies(
