@@ -149,7 +149,7 @@ bool GpsInterface::initialize(
   const hardware_interface::ComponentInfo & sensor_info,
   const hardware_interface::HardwareInfo & hardware_info,
   const std::string & environment,
-  const rclcpp::Node::SharedPtr &)
+  const rclcpp::Node::SharedPtr & sim_node)
 {
   if (initialized_) {
     return true;
@@ -157,6 +157,7 @@ bool GpsInterface::initialize(
 
   sensor_name_ = sensor_info.name;
   environment_ = environment;
+  sim_node_ = sim_node;
 
   if (environment_ != "real" && environment_ != "sim") {
     RCLCPP_ERROR(kLogger, "[GPS] Unsupported environment: %s", environment_.c_str());
@@ -176,6 +177,13 @@ bool GpsInterface::initialize(
     "serial_port",
     "gps_serial_port",
     serial_port_);
+
+  stonefish_topic_ = get_param_or(
+    sensor_info,
+    hardware_info,
+    "stonefish_topic",
+    "stonefish_topic",
+    stonefish_topic_);
 
   const std::string baudrate = get_param_or(
     sensor_info,
@@ -203,16 +211,44 @@ bool GpsInterface::initialize(
   last_altitude_ = 0.0;
   last_valid_ = 0.0;
 
+  if (environment_ == "sim") {
+    if (!sim_node_) {
+      RCLCPP_ERROR(kLogger, "[GPS] sim_node is null in simulation mode");
+      return false;
+    }
+
+    if (stonefish_topic_.empty()) {
+      RCLCPP_ERROR(
+        kLogger,
+        "[GPS] Missing parameter 'stonefish_topic' in sim mode");
+      return false;
+    }
+
+    gps_sub_ = sim_node_->create_subscription<sensor_msgs::msg::NavSatFix>(
+      stonefish_topic_,
+      rclcpp::SensorDataQoS(),
+      [this](const sensor_msgs::msg::NavSatFix::SharedPtr msg)
+      {
+        last_latitude_ = msg->latitude;
+        last_longitude_ = msg->longitude;
+        last_altitude_ = msg->altitude;
+        last_valid_ = msg->status.status >=
+          sensor_msgs::msg::NavSatStatus::STATUS_FIX ? 1.0 : 0.0;
+      });
+  }
+
   initialized_ = true;
   active_ = false;
 
   RCLCPP_INFO(
     kLogger,
-    "Configured GPS sensor '%s': protocol='%s', serial_port='%s', baudrate=%d",
+    "Configured GPS sensor '%s': protocol='%s', serial_port='%s', "
+    "baudrate=%d, stonefish_topic='%s'",
     sensor_name_.c_str(),
     protocol_.c_str(),
     serial_port_.c_str(),
-    baudrate_);
+    baudrate_,
+    stonefish_topic_.c_str());
 
   return true;
 }
@@ -224,7 +260,7 @@ bool GpsInterface::activate()
   }
 
 #ifdef TARGET_RASPBERRY
-  if (!open_serial()) {
+  if (environment_ == "real" && !open_serial()) {
     return false;
   }
 #endif
@@ -245,6 +281,8 @@ bool GpsInterface::cleanup()
   active_ = false;
   initialized_ = false;
   close_serial();
+  gps_sub_.reset();
+  sim_node_.reset();
   line_buffer_.clear();
   byte_buffer_.clear();
   return true;
@@ -257,65 +295,69 @@ bool GpsInterface::read(std::unordered_map<std::string, double> & states)
   }
 
 #ifdef TARGET_RASPBERRY
-  if (fd_ < 0) {
-    return false;
-  }
-
-  read_from_serial();
-
-  if (protocol_ == "nmea") {
-    std::string line;
-    while (read_line(line)) {
-      double parsed_latitude = last_latitude_;
-      double parsed_longitude = last_longitude_;
-      double parsed_altitude = last_altitude_;
-      double parsed_valid = last_valid_;
-      if (parse_gga(
-          line,
-          parsed_latitude,
-          parsed_longitude,
-          parsed_altitude,
-          parsed_valid))
-      {
-        last_latitude_ = parsed_latitude;
-        last_longitude_ = parsed_longitude;
-        last_altitude_ = parsed_altitude;
-        last_valid_ = parsed_valid;
-      }
+  if (environment_ == "real") {
+    if (fd_ < 0) {
+      return false;
     }
-  } else if (protocol_ == "ubx") {
-    std::vector<uint8_t> packet;
-    while (try_extract_ubx_packet(packet)) {
-      double parsed_latitude = last_latitude_;
-      double parsed_longitude = last_longitude_;
-      double parsed_altitude = last_altitude_;
-      double parsed_valid = last_valid_;
-      if (parse_nav_pvt(
-          packet,
-          parsed_latitude,
-          parsed_longitude,
-          parsed_altitude,
-          parsed_valid))
-      {
-        last_latitude_ = parsed_latitude;
-        last_longitude_ = parsed_longitude;
-        last_altitude_ = parsed_altitude;
-        last_valid_ = parsed_valid;
+
+    read_from_serial();
+
+    if (protocol_ == "nmea") {
+      std::string line;
+      while (read_line(line)) {
+        double parsed_latitude = last_latitude_;
+        double parsed_longitude = last_longitude_;
+        double parsed_altitude = last_altitude_;
+        double parsed_valid = last_valid_;
+        if (parse_gga(
+            line,
+            parsed_latitude,
+            parsed_longitude,
+            parsed_altitude,
+            parsed_valid))
+        {
+          last_latitude_ = parsed_latitude;
+          last_longitude_ = parsed_longitude;
+          last_altitude_ = parsed_altitude;
+          last_valid_ = parsed_valid;
+        }
       }
+    } else if (protocol_ == "ubx") {
+      std::vector<uint8_t> packet;
+      while (try_extract_ubx_packet(packet)) {
+        double parsed_latitude = last_latitude_;
+        double parsed_longitude = last_longitude_;
+        double parsed_altitude = last_altitude_;
+        double parsed_valid = last_valid_;
+        if (parse_nav_pvt(
+            packet,
+            parsed_latitude,
+            parsed_longitude,
+            parsed_altitude,
+            parsed_valid))
+        {
+          last_latitude_ = parsed_latitude;
+          last_longitude_ = parsed_longitude;
+          last_altitude_ = parsed_altitude;
+          last_valid_ = parsed_valid;
+        }
+      }
+    } else {
+      RCLCPP_ERROR_THROTTLE(
+        kLogger,
+        *rclcpp::Clock::make_shared(),
+        5000,
+        "Unknown GPS protocol '%s'. Use 'ubx' or 'nmea'.",
+        protocol_.c_str());
     }
-  } else {
-    RCLCPP_ERROR_THROTTLE(
-      kLogger,
-      *rclcpp::Clock::make_shared(),
-      5000,
-      "Unknown GPS protocol '%s'. Use 'ubx' or 'nmea'.",
-      protocol_.c_str());
   }
 #else
-  last_latitude_ = 0.0;
-  last_longitude_ = 0.0;
-  last_altitude_ = 0.0;
-  last_valid_ = 0.0;
+  if (environment_ == "real") {
+    last_latitude_ = 0.0;
+    last_longitude_ = 0.0;
+    last_altitude_ = 0.0;
+    last_valid_ = 0.0;
+  }
 #endif
 
   set_state_if_exists(states, "gps.latitude", last_latitude_);

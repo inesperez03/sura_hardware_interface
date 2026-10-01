@@ -7,6 +7,7 @@
 
 #include "hardware_interface/hardware_info.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/msg/nav_sat_fix.hpp"
 
 #include "sura_hardware_interface/sensors/sensor_interface_base.hpp"
 
@@ -61,9 +62,12 @@ private:
 
   std::string sensor_name_;
   std::string environment_{"real"};
+  rclcpp::Node::SharedPtr sim_node_;
+  rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr gps_sub_;
 
   std::string protocol_{"ubx"};
   std::string serial_port_{"/dev/ttyAMA5"};
+  std::string stonefish_topic_;
   int baudrate_{230400};
 
   int fd_{-1};
