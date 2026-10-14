@@ -5,6 +5,7 @@
 
 #include "hardware_interface/hardware_info.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/bool.hpp"
 
 #include "sura_hardware_interface/sensors/sensor_interface_base.hpp"
 
@@ -36,6 +37,11 @@ private:
   std::string environment_{"real"};
 
   double read_rate_hz_{1.0};
+  rclcpp::Node::SharedPtr sim_node_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr leak_sub_;
+
+  std::string stonefish_topic_;
+  double last_leak_{0.0};
 };
 
 }  // namespace sura_hardware_interface
